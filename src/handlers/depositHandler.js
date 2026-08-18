@@ -1,7 +1,7 @@
 const fs = require("fs");
 const QRCode = require("qrcode");
 
-const { createPayment, checkPaymentStatus, confirmInstantDeposit } = require("../utils/atl");
+const { createPayment, checkPaymentStatus } = require("../utils/dompetx");
 const { createPaymentMessage } = require("../utils/messageFormatter");
 const BalanceManager = require("./balanceHandler");
 
@@ -80,16 +80,14 @@ async function handleDepositAmount(bot, msg, session) {
   });
 
   try {
-    const apiKey = "15xyWfE4x76sm4Q1yIfadFg7wvQwlyNna8sL8nM77UuUNXJsDpK283ISQqEMRb1C5ArKyoQ16qSXz4LgeJC8iTnhU1kRY3wcIjiy";
     const reffId = generateUniqueCode();
 
-    const paymentRes = await createPayment(apiKey, reffId, amount);
-    if (!paymentRes?.status || !paymentRes?.data?.qr_string) {
+    const paymentData = await createPayment(reffId, amount);
+    if (!paymentData?.qr_string) {
       throw new Error("QRIS gagal dibuat");
     }
 
-    const paymentData = paymentRes.data;
-    const { messageText, keyboard } = createPaymentMessage(paymentData, amount, 0);
+    const { messageText, keyboard } = createPaymentMessage(paymentData, amount);
 
     /* 🔥 BUAT QR BUFFER (AMAN) */
     const qrBuffer = await QRCode.toBuffer(paymentData.qr_string, {
@@ -105,7 +103,7 @@ async function handleDepositAmount(bot, msg, session) {
     });
 
     /* 🔥 MONITOR STATUS */
-    monitorPaymentStatus(bot, chatId, amount, paymentData.id, apiKey);
+    monitorPaymentStatus(bot, chatId, amount, paymentData.id, paymentData.expired_at);
 
   } catch (error) {
     console.error("Payment Error:", error.message);
@@ -117,18 +115,16 @@ async function handleDepositAmount(bot, msg, session) {
 }
 
 /* ================== MONITOR PAYMENT ================== */
-function monitorPaymentStatus(bot, chatId, amount, depositId, apiKey) {
+function monitorPaymentStatus(bot, chatId, amount, depositId, expiredAt) {
+  const expiresAtMs = Date.parse(expiredAt);
+  const timeoutMs = Number.isFinite(expiresAtMs) ? Math.max(expiresAtMs - Date.now(), 0) : 15 * 60 * 1000;
   const interval = setInterval(async () => {
     try {
-      const statusRes = await checkPaymentStatus(apiKey, depositId);
-      const status = statusRes?.data?.status;
+      const statusRes = await checkPaymentStatus(depositId);
+      const status = String(statusRes?.status || '').toUpperCase();
 
-      if (status === "success" || status === "processing") {
+      if (["PAID", "SUCCESS", "COMPLETED"].includes(status)) {
         clearInterval(interval);
-
-        try {
-          await confirmInstantDeposit(apiKey, depositId);
-        } catch {}
 
         await BalanceManager.updateBalance(chatId, amount);
         saveBalanceToJson(chatId, amount);
@@ -142,7 +138,9 @@ function monitorPaymentStatus(bot, chatId, amount, depositId, apiKey) {
     } catch (err) {
       console.log("Cek status gagal:", err.message);
     }
-  }, 60000);
+  }, 10000);
+
+  setTimeout(() => clearInterval(interval), timeoutMs);
 }
 
 module.exports = {

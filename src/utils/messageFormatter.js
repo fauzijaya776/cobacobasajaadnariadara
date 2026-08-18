@@ -2,17 +2,17 @@ const {
   roundUpSpecs
 } = require('./specFormatter');
 
-function createPaymentMessage(paymentData, amount, uniqueAmount) {
+function createPaymentMessage(paymentData, amount) {
+  const totalBayar = Number(paymentData.totalBayar ?? amount);
   const messageText = `💰 *Deposit Saldo*\n\n` +
     `Nominal Deposit: Rp ${amount.toLocaleString('id-ID')}\n` +
-    `Kode Unik: Rp ${uniqueAmount.toLocaleString('id-ID')}\n` +
-    `Total Bayar: Rp ${(amount + uniqueAmount).toLocaleString('id-ID')}\n\n` +
+    `Total Bayar: Rp ${totalBayar.toLocaleString('id-ID')}\n\n` +
     `*Panduan Pembayaran QRIS:*\n` +
     `1. Scan QR Code di atas\n` +
     `2. Konfirmasi & selesaikan pembayaran\n` +
     `3. Tunggu saldo masuk otomatis\n` +
     `4. Jika ada kendala chat wa.me/6285173329868\n\n` +
-    `⏳ Pembayaran akan kadaluarsa dalam 30 menit.`;
+    `⏳ Pembayaran akan kadaluarsa sesuai waktu yang tercantum di QRIS.`;
 
   const keyboard = {
     // inline_keyboard: [[{ text: '« Kembali ke Menu', callback_data: 'back_to_menu' }]]

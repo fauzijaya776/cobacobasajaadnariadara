@@ -1,4 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
+const http = require('http');
 const { createMainMenu } = require('./utils/keyboard');
 const { handleInstallRDP, handleVPSCredentials, handleWindowsSelection, showWindowsSelection, handlePageNavigation, handleCancelInstallation } = require('./handlers/rdpHandler');
 const { handleDeposit, handleDepositAmount } = require('./handlers/depositHandler');
@@ -9,6 +10,26 @@ const { handleAddBalance, processAddBalance } = require('./handlers/adminHandler
 const { getBalance, isAdmin } = require('./utils/userManager');
 const DatabaseBackup = require('./utils/dbBackup');
 require('dotenv').config();
+
+// Render mengharuskan web service membuka port yang diberikan melalui PORT.
+// Bot Telegram tetap menggunakan long polling seperti sebelumnya.
+const port = Number(process.env.PORT) || 3000;
+const paymentGateway = 'dompetx';
+const webServer = http.createServer((req, res) => {
+  const isHealthCheck = req.url === '/health';
+  const body = isHealthCheck
+    ? JSON.stringify({ status: 'ok', service: 'rdp-installation-bot', paymentGateway })
+    : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS DompetX sedang berjalan.</p></body></html>';
+
+  res.writeHead(200, {
+    'Content-Type': isHealthCheck ? 'application/json; charset=utf-8' : 'text/html; charset=utf-8'
+  });
+  res.end(body);
+});
+
+webServer.listen(port, '0.0.0.0', () => {
+  console.log(`Web status aktif pada port ${port}; payment gateway: ${paymentGateway}`);
+});
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, {
   polling: {
