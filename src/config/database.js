@@ -55,6 +55,23 @@ console.log(
  * ("Cannot mix BigInt and other types") atau di JSON.stringify, jadi dikonversi
  * di satu tempat ini saja.
  */
+/**
+ * Pecah skrip SQL menjadi pernyataan-pernyataan tunggal.
+ *
+ * Hanya dipakai untuk DDL milik kita sendiri (CREATE TABLE / CREATE INDEX),
+ * yang tidak memuat titik koma di dalam string literal — jadi pemisahan
+ * sederhana ini aman di sini.
+ */
+function splitStatements(sql) {
+  return String(sql)
+    .split('\n')
+    .filter((baris) => !/^\s*--/.test(baris))   // buang baris komentar
+    .join('\n')
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 function normalizeRow(row) {
   if (!row) return undefined;
   const out = {};
@@ -92,9 +109,30 @@ const dbAsync = {
     return result.rows.map(normalizeRow);
   },
 
-  /** Jalankan satu atau beberapa pernyataan DDL sekaligus. */
+  /**
+   * Jalankan satu atau beberapa pernyataan DDL.
+   *
+   * Sengaja TIDAK memakai client.executeMultiple(). Fungsi itu mengirim
+   * permintaan tipe "sequence" ke server Turso, dan server membalasnya dengan
+   * HTTP 400 — sehingga pembuatan tabel gagal padahal koneksinya sehat:
+   *
+   *   Error initializing database tables: SERVER_ERROR: Server returned HTTP status 400
+   *
+   * execute() adalah operasi paling dasar dan didukung di semua mode
+   * (Turso remote maupun file lokal), jadi pernyataan dipecah dan dikirim
+   * satu per satu.
+   */
   async exec(sql) {
-    await client.executeMultiple(sql);
+    for (const statement of splitStatements(sql)) {
+      try {
+        await client.execute(statement);
+      } catch (error) {
+        // Sebutkan pernyataan mana yang gagal — pesan server saja terlalu samar.
+        const cuplikan = statement.replace(/\s+/g, ' ').slice(0, 80);
+        error.message = `${error.message} | pada: ${cuplikan}...`;
+        throw error;
+      }
+    }
   },
 
   /** Info mode yang sedang dipakai — dipakai fitur backup. */
@@ -166,11 +204,21 @@ async function initDatabase() {
     console.log('Database tables initialized successfully');
   } catch (error) {
     console.error('Error initializing database tables:', error.message);
-    if (isRemote) {
+    if (error.code) console.error('Kode error:', error.code);
+
+    const pesan = String(error.message || '');
+    if (/401|403|unauthor|token/i.test(pesan)) {
       console.error(
-        'Cek kembali TURSO_DATABASE_URL dan TURSO_AUTH_TOKEN di .env.\n' +
-        'Token yang sudah kedaluwarsa juga menghasilkan error ini.'
+        'Token ditolak. Buat token baru di dashboard Turso (Read & Write), ' +
+        'lalu perbarui TURSO_AUTH_TOKEN.'
       );
+    } else if (/400/.test(pesan)) {
+      console.error(
+        'Server menolak bentuk permintaannya. Pastikan versi @libsql/client ' +
+        'sudah terbaru: npm install @libsql/client@latest'
+      );
+    } else if (isRemote) {
+      console.error('Cek kembali TURSO_DATABASE_URL dan TURSO_AUTH_TOKEN.');
     }
     process.exit(1);
   }

@@ -17,6 +17,24 @@ const { createClient } = require('@libsql/client');
 
 const DRY = process.argv.includes('--dry-run');
 
+/**
+ * Jalankan pernyataan DDL satu per satu.
+ *
+ * Tidak memakai executeMultiple(): server Turso membalas permintaan
+ * "sequence" dengan HTTP 400, sehingga pembuatan tabel gagal padahal
+ * koneksinya sehat. execute() didukung di semua mode.
+ */
+async function jalankanDDL(client, sql) {
+  const pernyataan = String(sql)
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  for (const p of pernyataan) {
+    await client.execute(p);
+  }
+}
+
+
 const localPath = process.env.DB_PATH
   ? path.resolve(process.env.DB_PATH)
   : path.join(__dirname, '../src/rdp.db');
@@ -72,7 +90,7 @@ const token = (process.env.TURSO_AUTH_TOKEN || '').trim();
   }
 
   // Pastikan tabel ada di sisi Turso
-  await turso.executeMultiple(`
+  await jalankanDDL(turso, `
     CREATE TABLE IF NOT EXISTS users (
       telegram_id INTEGER PRIMARY KEY,
       balance REAL DEFAULT 0,
