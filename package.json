@@ -5,11 +5,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "cek-turso": "node scripts/cek-turso.js",
-    "migrasi": "node scripts/migrasi-ke-turso.js"
+    "migrasi-json": "node scripts/migrasi-ke-json.js"
   },
   "dependencies": {
-    "@libsql/client": "^0.15.0",
     "axios": "^1.6.2",
     "dotenv": "^16.3.1",
     "file-type": "^16.5.4",

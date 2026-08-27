@@ -12,7 +12,11 @@ node_modules/
 *.db-wal
 *.db-shm
 user_data.json
+
+# Data saldo — JANGAN di-commit, isinya berubah setiap transaksi
 data/
+saldo.json
+*.rusak-*
 
 # Log
 *.log

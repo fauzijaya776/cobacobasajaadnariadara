@@ -1,10 +1,9 @@
-const dbAsync = require('../config/database');
+const store = require('../utils/store');
 
 async function broadcastMessage(bot, message, adminChatId) {
   try {
     // Ambil semua telegram_id dari database
-    const users = await dbAsync.all('SELECT telegram_id FROM users');
-    const userIds = users.map(user => user.telegram_id);
+    const userIds = store.listUserIds();
 
     let successCount = 0; // Jumlah pesan yang berhasil dikirim
     let failedCount = 0;  // Jumlah pesan yang gagal dikirim

@@ -93,7 +93,8 @@ async function handleDepositAmount(bot, msg, session) {
 /* ================== MONITOR PAYMENT ================== */
 // Melacak deposit yang sedang dipantau supaya satu pembayaran tidak pernah
 // dikreditkan dua kali (mis. user menekan Deposit dua kali dengan nominal sama).
-const creditedDeposits = new Set();
+const creditedDeposits = new Set();   // sudah berhasil dikreditkan
+const sedangKredit = new Set();       // sedang dalam proses dikreditkan
 const activeMonitors = new Set();
 
 function monitorPaymentStatus(bot, chatId, amount, depositId, expiredAt) {
@@ -101,38 +102,54 @@ function monitorPaymentStatus(bot, chatId, amount, depositId, expiredAt) {
   activeMonitors.add(depositId);
 
   let creditFailures = 0;
+  let sedangCek = false;
   const expiresAtMs = Date.parse(expiredAt);
   const timeoutMs = Number.isFinite(expiresAtMs) ? Math.max(expiresAtMs - Date.now(), 0) : 15 * 60 * 1000;
   const interval = setInterval(async () => {
+    // setInterval tidak menunggu callback sebelumnya selesai, sedangkan satu
+    // pengecekan status bisa memakan puluhan detik. Tanpa penjaga ini, beberapa
+    // pengecekan menumpuk dan bisa mengkredit pembayaran yang sama berkali-kali.
+    if (sedangCek) return;
+    sedangCek = true;
+
     try {
       const statusRes = await checkPaymentStatus(depositId);
       const status = String(statusRes?.status || '').toUpperCase();
 
       if (["PAID", "SUCCESS", "COMPLETED"].includes(status)) {
-        if (creditedDeposits.has(depositId)) {
+        if (creditedDeposits.has(depositId) || sedangKredit.has(depositId)) {
           clearInterval(interval);
           activeMonitors.delete(depositId);
           return;
         }
 
-        // Kredit DULU, baru tandai sudah dikredit dan hentikan pemantauan.
-        // Urutan sebaliknya membuat deposit hilang selamanya kalau DB sedang
-        // terkunci: interval sudah mati dan deposit sudah dianggap selesai.
-        // Satu-satunya sumber saldo adalah database. Versi lama juga menulis
-        // ke user_data.json, tapi file itu hanya pernah DITAMBAH (tidak pernah
-        // dikurangi saat instalasi) dan tidak pernah dibaca untuk menentukan
-        // saldo — jadi angkanya selalu melenceng dan hanya membingungkan.
-        await BalanceManager.updateBalance(chatId, amount);
+        // Klaim dipasang SINKRON sebelum await supaya panggilan bersamaan
+        // langsung terpental. Pengaman sesungguhnya ada di store: penanda
+        // depositId disimpan PERMANEN bersama saldo dalam satu operasi, jadi
+        // satu pembayaran tidak mungkin dikreditkan dua kali — bahkan kalau
+        // pemantau mengulang atau bot restart di tengah proses.
+        sedangKredit.add(depositId);
+        let hasilKredit;
+        try {
+          hasilKredit = await BalanceManager.creditDeposit(chatId, amount, depositId);
+        } catch (errKredit) {
+          sedangKredit.delete(depositId);
+          throw errKredit;
+        }
 
         creditedDeposits.add(depositId);
+        sedangKredit.delete(depositId);
         clearInterval(interval);
         activeMonitors.delete(depositId);
 
-        await bot.sendMessage(
-          chatId,
-          `✅ *Pembayaran Berhasil!*\n\nSaldo bertambah *Rp ${amount.toLocaleString()}*`,
-          { parse_mode: "Markdown" }
-        );
+        // Kalau ternyata duplikat, jangan kirim notifikasi "berhasil" lagi.
+        if (!hasilKredit.duplikat) {
+          await bot.sendMessage(
+            chatId,
+            `✅ *Pembayaran Berhasil!*\n\nSaldo bertambah *Rp ${amount.toLocaleString()}*`,
+            { parse_mode: "Markdown" }
+          );
+        }
       }
     } catch (err) {
       creditFailures++;
@@ -150,6 +167,8 @@ function monitorPaymentStatus(bot, chatId, amount, depositId, expiredAt) {
           ).catch(() => {});
         }
       }
+    } finally {
+      sedangCek = false;
     }
   }, 10000);
 

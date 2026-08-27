@@ -30,6 +30,8 @@ const { getBalance, isAdmin } = require('./utils/userManager');
 const { INSTALLATION_COST } = require('./config/constants');
 const { safeEdit, safeSend, safeAnswer } = require('./utils/telegram');
 const DatabaseBackup = require('./utils/dbBackup');
+const store = require('./utils/store');
+const BackupTelegram = require('./utils/backupTelegram');
 
 /* ============ Validasi environment ============ */
 if (!process.env.BOT_TOKEN) {
@@ -52,7 +54,10 @@ const webServer = http.createServer((req, res) => {
         service: 'rdp-installation-bot',
         paymentGateway,
         uptime: Math.floor(process.uptime()),
-        activeSessions: userSessions.size
+        activeSessions: userSessions.size,
+        storage: 'json-file',
+        users: store.stats().users,
+        autoBackup: Boolean(backupChatId)
       })
     : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS DompetX sedang berjalan.</p></body></html>';
 
@@ -81,7 +86,69 @@ const bot = new TelegramBot(process.env.BOT_TOKEN, {
 
 const userSessions = new Map();
 const dbBackup = new DatabaseBackup(bot);
-dbBackup.scheduleBackup();
+
+/* ============ Penyimpanan data ============
+ * Data disimpan di file JSON, bukan database. Di hosting yang filesystem-nya
+ * sementara (Render free tier), file itu hilang setiap restart — jadi setiap
+ * perubahan juga dicadangkan ke Telegram, dan dipulihkan otomatis saat start.
+ *
+ * Isi BACKUP_CHAT_ID di .env dengan ID chat/channel tempat cadangan disimpan
+ * (boleh sama dengan ADMIN_ID). Tanpa itu, cadangan otomatis tidak aktif.
+ */
+const backupChatId = (process.env.BACKUP_CHAT_ID || process.env.ADMIN_ID || '')
+  .split(',')[0].trim();
+const cadangan = new BackupTelegram(bot, backupChatId);
+
+async function siapkanData() {
+  // Kalau file lokal tidak ada, coba pulihkan dari cadangan Telegram dulu.
+  await store.init(() => cadangan.pulihkan());
+
+  // Setiap penyimpanan ke disk memicu cadangan (digabung otomatis, tidak spam).
+  store.onChange = (data) => cadangan.jadwalkan(data);
+
+  if (!store.bolehCadangkan) {
+    // Pemulihan gagal karena gangguan, BUKAN karena belum ada cadangan.
+    // Menulis cadangan baru sekarang akan menghapus satu-satunya salinan
+    // saldo buyer, jadi cadangan dikunci sampai bot di-restart.
+    const pesan =
+      '🚨 *PERHATIAN - DATA BELUM PULIH*\n\n' +
+      'Bot gagal memulihkan data dari cadangan:\n' +
+      `\`${store.alasanKunci}\`\n\n` +
+      'Cadangan otomatis DIKUNCI supaya cadangan lama tidak tertimpa data kosong.\n\n' +
+      'Jangan biarkan buyer bertransaksi sekarang. Perbaiki koneksi lalu restart bot.';
+    console.error(pesan.replace(/[*`]/g, ''));
+    if (backupChatId) {
+      safeSend(bot, backupChatId, pesan, { parse_mode: 'Markdown' }).catch(() => {});
+    }
+  } else if (cadangan.aktif) {
+    console.log(`Cadangan otomatis aktif ke chat ${backupChatId}`);
+  } else {
+    console.warn(
+      'PERINGATAN: BACKUP_CHAT_ID belum diatur. Data hanya tersimpan di file lokal\n' +
+      '            dan AKAN HILANG kalau hosting me-restart container.'
+    );
+  }
+
+  // Kalau cadangan gagal berkali-kali, admin harus tahu — bukan diam-diam.
+  cadangan.onGagalTerus = (jumlah) => {
+    if (!backupChatId) return;
+    safeSend(bot, backupChatId,
+      `⚠️ Cadangan otomatis gagal ${jumlah}x beruntun.\n` +
+      `Perubahan saldo terbaru belum tersimpan permanen dan bisa hilang ` +
+      `kalau server restart. Cek koneksi bot.`).catch(() => {});
+  };
+
+  store.onSaveError = (error) => {
+    if (!backupChatId) return;
+    safeSend(bot, backupChatId,
+      `⚠️ Gagal menulis data ke disk: ${error.message}\n` +
+      `Cadangan Telegram tetap dijalankan sebagai pengaman.`).catch(() => {});
+  };
+
+  dbBackup.scheduleBackup();
+}
+
+const dataSiap = siapkanData();
 
 /* ============ Menu perintah Telegram ============
  * setMyCommands membuat tombol "Menu" biru muncul di sebelah kolom ketik.
@@ -190,6 +257,7 @@ async function runOnFreshMessage(chatId, handler) {
 /* ============ /start ============ */
 bot.onText(/^\/start\b/, async (msg) => {
   try {
+    await dataSiap;
     const chatId = msg.chat.id;
     await ensurePersistentKeyboard(chatId);
     await sendMainMenu(chatId);
@@ -201,12 +269,14 @@ bot.onText(/^\/start\b/, async (msg) => {
 
 /* ============ Perintah lain (muncul di tombol Menu Telegram) ============ */
 bot.onText(/^\/install\b/, async (msg) => {
+  await dataSiap;
   const chatId = msg.chat.id;
   await ensurePersistentKeyboard(chatId);
   await runOnFreshMessage(chatId, (mid) => handleInstallRDP(bot, chatId, mid, userSessions));
 });
 
 bot.onText(/^\/deposit\b/, async (msg) => {
+  await dataSiap;
   const chatId = msg.chat.id;
   if (hasActiveInstall(chatId)) {
     await safeSend(bot, chatId, '⏳ Selesaikan dulu instalasi yang sedang berjalan.');
@@ -220,6 +290,9 @@ bot.onText(/^\/deposit\b/, async (msg) => {
 });
 
 bot.onText(/^\/saldo\b/, async (msg) => {
+  // Wajib menunggu: selama pemulihan dari Telegram berlangsung, data masih
+  // kosong — tanpa ini buyer melihat saldonya Rp 0 tepat setelah restart.
+  await dataSiap;
   const chatId = msg.chat.id;
   try {
     const balance = await getBalance(chatId);
@@ -242,11 +315,13 @@ bot.onText(/^\/saldo\b/, async (msg) => {
 });
 
 bot.onText(/^\/faq\b/, async (msg) => {
+  await dataSiap;
   const chatId = msg.chat.id;
   await runOnFreshMessage(chatId, (mid) => handleFAQ(bot, chatId, mid));
 });
 
 bot.onText(/^\/batal\b/, async (msg) => {
+  await dataSiap;
   const chatId = msg.chat.id;
 
   if (isInstalling(chatId)) {
@@ -268,6 +343,7 @@ bot.onText(/^\/batal\b/, async (msg) => {
 
 /** Aksi untuk tombol keyboard persisten (mengirim teks, bukan callback). */
 async function handleKeyboardButton(chatId, text) {
+  await dataSiap;
   switch (text) {
     case BUTTON.INSTALL:
       await runOnFreshMessage(chatId, (mid) => handleInstallRDP(bot, chatId, mid, userSessions));
@@ -317,6 +393,7 @@ async function handleKeyboardButton(chatId, text) {
 bot.on('message', async (msg) => {
   try {
     if (!msg.text || msg.text.startsWith('/')) return;
+    await dataSiap;
 
     const chatId = msg.chat.id;
     const text = msg.text.trim();
@@ -371,6 +448,7 @@ bot.on('callback_query', async (query) => {
 
   try {
     if (!chatId || !data) return;
+    await dataSiap;
 
     if (data.startsWith('page_')) {
       await handlePageNavigation(bot, query, userSessions);
@@ -530,6 +608,34 @@ bot.on('polling_error', (error) => {
 });
 
 bot.on('error', (error) => console.error('Bot error:', error));
+
+/* ============ Berhenti dengan rapi ============
+ * Render mengirim SIGTERM di setiap deploy dan restart. Tanpa penanganan ini,
+ * perubahan saldo yang masih menunggu jadwal cadangan (sampai 20 detik) ikut
+ * hilang bersama container — dan di filesystem sementara, itu berarti hilang
+ * permanen.
+ */
+let sedangMatikan = false;
+async function matikanDenganRapi(sinyal) {
+  if (sedangMatikan) return;
+  sedangMatikan = true;
+  console.log(`${sinyal} diterima — menyimpan data dan mengirim cadangan terakhir...`);
+
+  try { store.simpanSebelumKeluar(); } catch (_) {}
+
+  try {
+    const ok = await cadangan.flush(8000);
+    console.log(ok ? 'Cadangan terakhir terkirim.' : 'Cadangan terakhir TIDAK terkirim.');
+  } catch (error) {
+    console.error('Gagal mengirim cadangan terakhir:', error.message);
+  }
+
+  process.exit(0);
+}
+
+for (const sinyal of ['SIGTERM', 'SIGINT']) {
+  process.on(sinyal, () => { matikanDenganRapi(sinyal); });
+}
 
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);

@@ -1,81 +1,47 @@
-const db = require('../config/database');
+const store = require('../utils/store');
 
+/**
+ * Pembungkus saldo yang dipakai alur deposit.
+ * Sekarang berjalan di atas penyimpanan file JSON, bukan database.
+ */
 class BalanceManager {
-  // Get current user balance
   static async getUserBalance(userId) {
-    try {
-      const row = await db.get(
-        'SELECT balance FROM users WHERE telegram_id = ?',
-        [userId]
-      );
-      return row ? row.balance : 0;
-    } catch (error) {
-      console.error('Error getting user balance:', error);
-      throw error;
-    }
+    return store.getBalance(userId);
   }
 
-  // Update user balance
-  static async updateBalance(userId, amount) {
-    try {
-      // First, check if user exists
-      const user = await db.get(
-        'SELECT * FROM users WHERE telegram_id = ?',
-        [userId]
-      );
-
-      if (!user) {
-        // Create new user if doesn't exist
-        await db.run(
-          'INSERT INTO users (telegram_id, balance) VALUES (?, ?)',
-          [userId, amount]
-        );
-      } else {
-        // Update existing user's balance
-        await db.run(
-          'UPDATE users SET balance = balance + ? WHERE telegram_id = ?',
-          [amount, userId]
-        );
-      }
-
-      // Log the transaction
-      await this.logTransaction(userId, amount, 'deposit');
-      
-      return await this.getUserBalance(userId);
-    } catch (error) {
-      console.error('Error updating balance:', error);
-      throw error;
-    }
+  /** Tambah saldo dan catat transaksinya. */
+  static async updateBalance(userId, amount, type = 'deposit') {
+    const hasil = store.credit(userId, amount, type);
+    if (!hasil.ok) throw new Error(`Nominal deposit tidak sah: ${amount}`);
+    return hasil.balance;
   }
 
-  // Log transaction history
+  /**
+   * Kreditkan pembayaran, dijamin hanya sekali per depositId.
+   *
+   * Dipakai alur deposit supaya pembayaran yang sama tidak pernah dikreditkan
+   * dua kali walau pemantau mengulang atau bot restart.
+   *
+   * @returns {{balance:number, duplikat:boolean}}
+   */
+  static async creditDeposit(userId, amount, depositId) {
+    const hasil = store.creditDeposit(userId, amount, depositId);
+    if (hasil.duplikat) {
+      console.warn(`[DEPOSIT] ${depositId} sudah pernah dikreditkan — dilewati.`);
+      return { balance: hasil.balance, duplikat: true };
+    }
+    if (!hasil.ok) throw new Error(`Nominal deposit tidak sah: ${amount}`);
+    return { balance: hasil.balance, duplikat: false };
+  }
+
   static async logTransaction(userId, amount, type) {
-    try {
-      await db.run(
-        'INSERT INTO transactions (user_id, amount, type, created_at) VALUES (?, ?, ?, datetime("now"))',
-        [userId, amount, type]
-      );
-    } catch (error) {
-      console.error('Error logging transaction:', error);
-      throw error;
-    }
+    // Pencatatan sudah dilakukan otomatis oleh credit/debit di store.
+    // Fungsi ini dipertahankan agar pemanggil lama tidak perlu diubah.
+    return true;
   }
 
-  // Get transaction history for a user
   static async getTransactionHistory(userId, limit = 10) {
-    try {
-      const transactions = await db.all(
-        `SELECT * FROM transactions 
-         WHERE user_id = ? 
-         ORDER BY created_at DESC 
-         LIMIT ?`,
-        [userId, limit]
-      );
-      return transactions;
-    } catch (error) {
-      console.error('Error getting transaction history:', error);
-      throw error;
-    }
+    return store.transactionsFor(userId, limit);
   }
 }
 

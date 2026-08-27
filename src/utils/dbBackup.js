@@ -2,54 +2,36 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { scheduleJob } = require('node-schedule');
-const db = require('../config/database');
+const store = require('./store');
 const { isAdmin } = require('./userManager');
 
-const TABLES = ['users', 'transactions', 'installations'];
-
+/**
+ * Backup manual & terjadwal ke admin.
+ *
+ * Berbeda dari backupTelegram.js yang berjalan otomatis di latar belakang,
+ * yang ini dipicu admin lewat tombol atau jadwal mingguan, dan hasilnya
+ * bisa disimpan sendiri oleh admin sebagai arsip.
+ */
 class DatabaseBackup {
   constructor(bot) {
     this.bot = bot;
     this.backupSchedule = '0 0 * * 0'; // tiap Minggu tengah malam
   }
 
-  /** Admin pertama pada ADMIN_ID (mendukung beberapa admin dipisah koma). */
   get adminId() {
     return (process.env.ADMIN_ID || '').split(',')[0].trim();
   }
 
-  /**
-   * Ekspor seluruh isi database ke satu file JSON.
-   *
-   * Dipakai untuk kedua mode. Pada mode Turso tidak ada file .db lokal yang
-   * bisa dikirim, dan dump JSON juga lebih mudah diperiksa serta dipulihkan
-   * daripada file biner.
-   */
-  async exportToJson() {
-    const dump = {
-      exported_at: new Date().toISOString(),
-      mode: db.info().isRemote ? 'turso' : 'file',
-      tables: {}
-    };
-
-    for (const table of TABLES) {
-      try {
-        dump.tables[table] = await db.all(`SELECT * FROM ${table}`);
-      } catch (error) {
-        // Tabel bisa saja belum ada pada instalasi baru — bukan alasan gagal.
-        console.warn(`Backup: tabel ${table} dilewati (${error.message})`);
-        dump.tables[table] = [];
-      }
-    }
-
+  /** Tulis seluruh data ke satu file JSON sementara. */
+  exportToFile() {
+    const data = store.exportAll();
     const stamp = new Date().toISOString().slice(0, 10);
     const filePath = path.join(os.tmpdir(), `rdpbot-backup-${stamp}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(dump, null, 2));
-    return { filePath, dump };
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    return { filePath, data };
   }
 
   /**
-   * Kirim backup ke admin.
    * @returns {Promise<boolean>} true kalau benar-benar terkirim.
    *          Pemanggil memakai ini agar tidak melaporkan sukses palsu.
    */
@@ -60,39 +42,34 @@ class DatabaseBackup {
         return false;
       }
 
-      const { filePath, dump } = await this.exportToJson();
-      const users = dump.tables.users || [];
-      const totalSaldo = users.reduce((sum, u) => sum + Number(u.balance || 0), 0);
+      const { filePath } = this.exportToFile();
+      const s = store.stats();
       const sizeKb = (fs.statSync(filePath).size / 1024).toFixed(1);
 
       await this.bot.sendDocument(this.adminId, filePath, {
         caption:
-          `📊 *Backup Database*\n\n` +
+          `📊 *Backup Data*\n\n` +
           `📅 ${new Date().toLocaleString('id-ID')}\n` +
-          `🗄️ Mode: ${dump.mode === 'turso' ? 'Turso (cloud)' : 'File lokal'}\n` +
-          `👥 User: ${users.length}\n` +
-          `💰 Total saldo: Rp ${totalSaldo.toLocaleString('id-ID')}\n` +
-          `🧾 Transaksi: ${(dump.tables.transactions || []).length}\n` +
-          `🖥️ Instalasi: ${(dump.tables.installations || []).length}\n` +
+          `👥 User: ${s.users}\n` +
+          `💰 Total saldo: Rp ${s.totalSaldo.toLocaleString('id-ID')}\n` +
+          `🧾 Transaksi: ${s.transactions}\n` +
+          `🖥️ Instalasi: ${s.installations}\n` +
           `📦 ${sizeKb} KB`,
         parse_mode: 'Markdown'
       });
 
       try { fs.unlinkSync(filePath); } catch (_) {}
-
-      console.log('Backup database terkirim');
+      console.log('Backup terkirim ke admin');
       return true;
     } catch (error) {
-      console.error('Gagal mengirim backup database:', error.message);
+      console.error('Gagal mengirim backup:', error.message);
       return false;
     }
   }
 
   scheduleBackup() {
-    scheduleJob(this.backupSchedule, () => {
-      this.sendBackupToAdmin();
-    });
-    console.log('Backup database dijadwalkan (tiap Minggu 00:00)');
+    scheduleJob(this.backupSchedule, () => this.sendBackupToAdmin());
+    console.log('Backup mingguan dijadwalkan (tiap Minggu 00:00)');
   }
 
   async handleManageDatabase(chatId, messageId) {
@@ -107,27 +84,20 @@ class DatabaseBackup {
       return;
     }
 
-    const info = db.info();
-    const lokasi = info.isRemote
-      ? `Turso — ${info.url.replace(/^libsql:\/\//, '')}`
-      : `File lokal — ${info.localPath}`;
-
-    let ringkasan = '';
-    try {
-      const u = await db.get('SELECT COUNT(*) AS n, SUM(balance) AS total FROM users');
-      ringkasan =
-        `👥 User: ${u.n || 0}\n` +
-        `💰 Total saldo: Rp ${Number(u.total || 0).toLocaleString('id-ID')}\n\n`;
-    } catch (_) {
-      ringkasan = '';
-    }
+    const s = store.stats();
+    const autoAktif = Boolean((process.env.BACKUP_CHAT_ID || '').trim());
 
     await this.bot.editMessageText(
-      `📊 *Manajemen Database*\n\n` +
-      `🗄️ ${lokasi}\n\n` +
-      ringkasan +
-      `• Backup otomatis tiap Minggu\n` +
-      `• Backup manual bisa kapan saja\n\n` +
+      `📊 *Manajemen Data*\n\n` +
+      `🗄️ Penyimpanan: file JSON\n` +
+      `📁 ${s.file}\n\n` +
+      `👥 User: ${s.users}\n` +
+      `💰 Total saldo: Rp ${s.totalSaldo.toLocaleString('id-ID')}\n` +
+      `🧾 Transaksi: ${s.transactions}\n` +
+      `🖥️ Instalasi: ${s.installations}\n` +
+      `🕒 Terakhir berubah: ${s.updated_at ? new Date(s.updated_at).toLocaleString('id-ID') : '-'}\n\n` +
+      `🔄 Cadangan otomatis: ${autoAktif ? '✅ aktif' : '⚠️ nonaktif (BACKUP_CHAT_ID belum diisi)'}\n` +
+      `📆 Backup mingguan: tiap Minggu 00:00\n\n` +
       `Pilih tindakan:`,
       {
         chat_id: chatId,
