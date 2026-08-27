@@ -1,35 +1,8 @@
-const fs = require("fs");
 const QRCode = require("qrcode");
 
 const { createPayment, checkPaymentStatus } = require("../utils/dompetx");
 const { createPaymentMessage } = require("../utils/messageFormatter");
 const BalanceManager = require("./balanceHandler");
-
-const filePath = "user_data.json";
-
-/* ================== UTIL JSON ================== */
-function readData() {
-  if (!fs.existsSync(filePath)) return [];
-  const raw = fs.readFileSync(filePath, "utf8");
-  return raw ? JSON.parse(raw) : [];
-}
-
-function saveData(data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-}
-
-function saveBalanceToJson(chatId, amount) {
-  const users = readData();
-  const index = users.findIndex(u => u.chat_id === chatId);
-
-  if (index !== -1) {
-    users[index].amount += amount;
-  } else {
-    users.push({ chat_id: chatId, amount });
-  }
-
-  saveData(users);
-}
 
 /* ================== HELPER ================== */
 function generateUniqueCode() {
@@ -64,14 +37,15 @@ async function handleDepositAmount(bot, msg, session) {
 
   if (!amount || amount < 2000) {
     await bot.editMessageText(
-      "❌ Jumlah tidak valid.\n\nMasukkan jumlah deposit (min Rp 2.000)",
+      `❌ Jumlah tidak valid.\n\nMasukkan jumlah deposit (min Rp 2.000)\n\n_Percobaan ${new Date().toLocaleTimeString("id-ID")}_`,
       {
         chat_id: chatId,
         message_id: session.messageId,
         parse_mode: "Markdown",
       }
-    );
-    return;
+    ).catch(() => {});
+    // false = sesi JANGAN dihapus, user masih diminta mengirim nominal lagi.
+    return false;
   }
 
   await bot.editMessageText("🔄 Membuat QRIS pembayaran...", {
@@ -104,18 +78,29 @@ async function handleDepositAmount(bot, msg, session) {
 
     /* 🔥 MONITOR STATUS */
     monitorPaymentStatus(bot, chatId, amount, paymentData.id, paymentData.expired_at);
+    return true;
 
   } catch (error) {
     console.error("Payment Error:", error.message);
     await bot.editMessageText("❌ Gagal membuat pembayaran. Coba lagi.", {
       chat_id: chatId,
       message_id: session.messageId,
-    });
+    }).catch(() => {});
+    return true;
   }
 }
 
 /* ================== MONITOR PAYMENT ================== */
+// Melacak deposit yang sedang dipantau supaya satu pembayaran tidak pernah
+// dikreditkan dua kali (mis. user menekan Deposit dua kali dengan nominal sama).
+const creditedDeposits = new Set();
+const activeMonitors = new Set();
+
 function monitorPaymentStatus(bot, chatId, amount, depositId, expiredAt) {
+  if (activeMonitors.has(depositId)) return;
+  activeMonitors.add(depositId);
+
+  let creditFailures = 0;
   const expiresAtMs = Date.parse(expiredAt);
   const timeoutMs = Number.isFinite(expiresAtMs) ? Math.max(expiresAtMs - Date.now(), 0) : 15 * 60 * 1000;
   const interval = setInterval(async () => {
@@ -124,10 +109,24 @@ function monitorPaymentStatus(bot, chatId, amount, depositId, expiredAt) {
       const status = String(statusRes?.status || '').toUpperCase();
 
       if (["PAID", "SUCCESS", "COMPLETED"].includes(status)) {
-        clearInterval(interval);
+        if (creditedDeposits.has(depositId)) {
+          clearInterval(interval);
+          activeMonitors.delete(depositId);
+          return;
+        }
 
+        // Kredit DULU, baru tandai sudah dikredit dan hentikan pemantauan.
+        // Urutan sebaliknya membuat deposit hilang selamanya kalau DB sedang
+        // terkunci: interval sudah mati dan deposit sudah dianggap selesai.
+        // Satu-satunya sumber saldo adalah database. Versi lama juga menulis
+        // ke user_data.json, tapi file itu hanya pernah DITAMBAH (tidak pernah
+        // dikurangi saat instalasi) dan tidak pernah dibaca untuk menentukan
+        // saldo — jadi angkanya selalu melenceng dan hanya membingungkan.
         await BalanceManager.updateBalance(chatId, amount);
-        saveBalanceToJson(chatId, amount);
+
+        creditedDeposits.add(depositId);
+        clearInterval(interval);
+        activeMonitors.delete(depositId);
 
         await bot.sendMessage(
           chatId,
@@ -136,11 +135,28 @@ function monitorPaymentStatus(bot, chatId, amount, depositId, expiredAt) {
         );
       }
     } catch (err) {
-      console.log("Cek status gagal:", err.message);
+      creditFailures++;
+      console.error(`Cek/kredit deposit ${depositId} gagal (${creditFailures}x):`, err.message);
+
+      // Kalau pengkreditan gagal berulang kali, jangan diamkan — uang user
+      // sudah masuk tapi saldonya belum bertambah.
+      if (creditFailures === 5) {
+        const adminId = (process.env.ADMIN_ID || "").split(",")[0].trim();
+        if (adminId) {
+          bot.sendMessage(adminId,
+            `⚠️ Deposit butuh perhatian manual\n\n` +
+            `User: ${chatId}\nNominal: Rp ${amount.toLocaleString("id-ID")}\n` +
+            `Deposit ID: ${depositId}\nError: ${err.message}`
+          ).catch(() => {});
+        }
+      }
     }
   }, 10000);
 
-  setTimeout(() => clearInterval(interval), timeoutMs);
+  setTimeout(() => {
+    clearInterval(interval);
+    activeMonitors.delete(depositId);
+  }, timeoutMs);
 }
 
 module.exports = {

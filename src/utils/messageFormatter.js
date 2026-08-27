@@ -1,7 +1,3 @@
-const {
-  roundUpSpecs
-} = require('./specFormatter');
-
 function createPaymentMessage(paymentData, amount) {
   const totalBayar = Number(paymentData.totalBayar ?? amount);
   const messageText = `💰 *Deposit Saldo*\n\n` +
@@ -14,43 +10,48 @@ function createPaymentMessage(paymentData, amount) {
     `4. Jika ada kendala chat wa.me/6285173329868\n\n` +
     `⏳ Pembayaran akan kadaluarsa sesuai waktu yang tercantum di QRIS.`;
 
-  const keyboard = {
-    // inline_keyboard: [[{ text: '« Kembali ke Menu', callback_data: 'back_to_menu' }]]
-  };
-
-  return { 
-    messageText, 
-    keyboard,
+  return {
+    messageText,
+    keyboard: {}
   };
 }
 
 function createSuccessMessage(amount, newBalance) {
   return `✅ *Pembayaran Berhasil!*\n\n` +
-  `💰 Saldo ditambahkan: Rp ${amount.toLocaleString('id-ID')}\n` +
-  `💳 Saldo saat ini: Rp ${newBalance.toLocaleString('id-ID')}`;
+    `💰 Saldo ditambahkan: Rp ${amount.toLocaleString('id-ID')}\n` +
+    `💳 Saldo saat ini: Rp ${newBalance.toLocaleString('id-ID')}`;
 }
 
 function createErrorMessage(status) {
   return status === 'Expired'
-  ? '⏰ Waktu pembayaran telah habis.': '❌ Pembayaran dibatalkan.';
+    ? '⏰ Waktu pembayaran telah habis.'
+    : '❌ Pembayaran dibatalkan.';
 }
 
-function formatVPSSpecs(rawSpecs, configSpecs) {
-  const roundedSpecs = roundUpSpecs(rawSpecs);
-  return `📊 *Spesifikasi VPS:*\n\n` +
-  `*Spesifikasi Asli:*\n` +
-  `• CPU: ${roundedSpecs.cpu} Core\n` +
-  `• RAM: ${roundedSpecs.ram}GB\n` +
-  `• Storage: ${roundedSpecs.storage}GB\n\n` +
-  `*Spesifikasi Setelah Instalasi:*\n` +
-  `• CPU: ${configSpecs.cpu} Core\n` +
-  `• RAM: ${configSpecs.ram}GB (dikurangi 2GB)\n` +
-  `• Storage: ${configSpecs.storage}GB (dikurangi 10GB)\n\n`;
+/**
+ * Tampilan spesifikasi.
+ *
+ * RAM ditampilkan PENUH sesuai ukuran VPS — tidak ada pengurangan.
+ * Storage tetap disebut apa adanya karena sebagian ruang dipakai sistem host
+ * dan swap; angkanya dihitung dari ruang kosong yang benar-benar tersedia.
+ */
+function formatVPSSpecs(rawSpecs, allocation) {
+  return `📊 *Spesifikasi VPS*\n\n` +
+    `• CPU: ${allocation.cpu} Core\n` +
+    `• RAM: ${allocation.ram} GB\n` +
+    `• Storage: ${allocation.storage} GB\n\n` +
+    `_RAM dialokasikan penuh ke Windows._\n\n`;
+}
+
+/** Versi ringkas untuk ditempel di pesan lain. */
+function formatAllocationLine(allocation) {
+  return `${allocation.cpu} Core · ${allocation.ram} GB RAM · ${allocation.storage} GB Storage`;
 }
 
 module.exports = {
   createPaymentMessage,
   createSuccessMessage,
   createErrorMessage,
-  formatVPSSpecs
+  formatVPSSpecs,
+  formatAllocationLine
 };

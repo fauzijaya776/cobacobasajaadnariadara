@@ -1,0 +1,25 @@
+# Kredensial — JANGAN pernah di-commit
+.env
+.env.*
+!.env.example
+
+# Dependensi
+node_modules/
+
+# Database & data runtime
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+user_data.json
+data/
+
+# Log
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

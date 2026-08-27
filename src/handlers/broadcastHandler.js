@@ -18,7 +18,7 @@ function setupBroadcastHandler(bot) {
         await bot.sendMessage(chatId, `🚀 Memulai broadcast...\n\nPesan: ${message}`);
 
         // Jalankan broadcast dengan await
-        await broadcastMessage(bot, message);
+        await broadcastMessage(bot, message, chatId);
 
         // Beri tahu admin bahwa broadcast selesai
         await bot.sendMessage(chatId, "✅ Broadcast selesai!");
