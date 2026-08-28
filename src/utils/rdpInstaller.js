@@ -44,6 +44,11 @@ export DEBIAN_FRONTEND=noninteractive
 mkdir -p ${REMOTE_DIR}
 rm -f ${STATUS_FILE} ${PID_FILE} ${LOG_FILE}
 
+# Penanda langkah. Bot membaca ini untuk memberi tahu user apa yang sedang
+# dikerjakan — tanpa itu, layar berhenti di satu angka dan user tidak bisa
+# membedakan "sedang bekerja" dari "macet".
+echo "STEP=apt"
+
 # --- 1. Tunggu apt/dpkg lock lepas (maks ~180 detik) ---
 LOCK_WAITED=0
 for i in $(seq 1 60); do
@@ -62,6 +67,7 @@ for i in $(seq 1 60); do
 done
 echo "LOCK_WAITED=$LOCK_WAITED"
 
+echo "STEP=swap"
 # --- 2. Swap + overcommit (bantalan agar RAM bisa dialokasikan penuh) ---
 SWAP_ACTIVE=$(swapon --show=NAME --noheadings 2>/dev/null | wc -l)
 if [ "$SWAP_ACTIVE" -eq 0 ]; then
@@ -79,6 +85,7 @@ sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1
 SWAP_MB=$(free -m 2>/dev/null | awk '/^Swap:/ {print $2}')
 echo "SWAP_MB=$SWAP_MB"
 
+echo "STEP=unduh"
 # --- 3. Unduh script installer ---
 DL_TOOL=none
 if command -v curl >/dev/null 2>&1; then
@@ -121,6 +128,7 @@ fi
 echo "SCRIPT_SIZE=$SCRIPT_SIZE"
 
 chmod +x ${REMOTE_DIR}/rdp.sh
+echo "STEP=siap"
 echo "PREP_ERROR=NONE"
 echo "PREP_DONE=1"
 `.trim();
@@ -219,16 +227,55 @@ async function installRDP(target, config, hooks = {}) {
   const log = (msg) => { if (onLog) onLog(msg); };
 
   /* ---------- Tahap 1: persiapan host + unduh script ---------- */
-  if (onProgress) onProgress({ phase: 'prepare', percent: 5, note: 'Menyiapkan VPS' });
+  const mulaiPrep = Date.now();
+  const menit = () => Math.floor((Date.now() - mulaiPrep) / 60000);
+
+  const LANGKAH = {
+    apt: { percent: 4, note: 'Menunggu VPS siap (apt)' },
+    swap: { percent: 6, note: 'Menyiapkan memori tambahan (swap)' },
+    unduh: { percent: 8, note: 'Mengunduh installer' },
+    siap: { percent: 9, note: 'Persiapan selesai' }
+  };
+  let langkahSekarang = 'Menghubungkan ke VPS';
+  let persenSekarang = 3;
+
+  if (onProgress) onProgress({ phase: 'prepare', percent: 3, note: langkahSekarang, paksa: true });
 
   let conn = await ssh.connectWithRetry(target, { percobaan: 3, onLog: log });
+
+  // Detak jantung: tetap memperbarui layar walau langkahnya belum berganti,
+  // supaya user tahu prosesnya hidup — bukan menggantung.
+  const detak = setInterval(() => {
+    if (onProgress) {
+      onProgress({
+        phase: 'prepare',
+        percent: persenSekarang,
+        note: `${langkahSekarang} · ${menit()} menit`
+      });
+    }
+  }, 45000);
+
   let prep;
   try {
     prep = await ssh.exec(conn, buildPrepareCommand({ scriptUrl, swapGb }), {
-      onLog: log,
-      timeoutMs: 15 * 60 * 1000
+      onLog: (teks) => {
+        log(teks);
+        const cocok = String(teks).match(/STEP=(\w+)/);
+        if (cocok && LANGKAH[cocok[1]]) {
+          const l = LANGKAH[cocok[1]];
+          langkahSekarang = l.note;
+          persenSekarang = l.percent;
+          if (onProgress) {
+            onProgress({ phase: 'prepare', percent: l.percent, note: l.note, paksa: true });
+          }
+        }
+      },
+      // 15 menit terlalu lama untuk tahap persiapan. Kalau lebih dari 8 menit,
+      // hampir pasti ada yang menggantung — lebih baik user diberi tahu.
+      timeoutMs: 8 * 60 * 1000
     });
   } finally {
+    clearInterval(detak);
     try { conn.end(); } catch (_) {}
   }
 
@@ -245,7 +292,7 @@ async function installRDP(target, config, hooks = {}) {
   log(`[prep] swap aktif: ${swapMb} MB, script: ${scriptUrl}\n`);
 
   /* ---------- Tahap 2: jalankan installer secara detached ---------- */
-  if (onProgress) onProgress({ phase: 'launch', percent: 10, note: 'Memulai instalasi' });
+  if (onProgress) onProgress({ phase: 'launch', percent: 10, note: 'Memulai instalasi', paksa: true });
 
   conn = await ssh.connectWithRetry(target, { percobaan: 3, onLog: log });
   let launch;
@@ -336,7 +383,7 @@ async function waitForCompletion(target, { onLog, onProgress } = {}) {
     if (state === 'DONE') {
       const exitCode = parseInt(ssh.readField(result.stdout, 'INSTALL_EXIT') || '-1', 10);
       if (exitCode === 0) {
-        if (onProgress) onProgress({ phase: 'done', percent: 100, note: 'Selesai' });
+        if (onProgress) onProgress({ phase: 'done', percent: 100, note: 'Selesai', paksa: true });
         return { success: true, exitCode, durationMs: Date.now() - startedAt };
       }
       const tail = (result.stdout.split('---LOGTAIL---')[1] || '').trim();

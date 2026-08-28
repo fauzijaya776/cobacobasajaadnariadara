@@ -651,26 +651,59 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
   };
 
   // Batasi frekuensi update agar tidak kena rate limit Telegram.
+  //
+  // `paksa` dipakai saat tahap berganti. Tanpa itu, pergantian tahap yang
+  // terjadi kurang dari 30 detik setelah update terakhir akan ditelan diam-diam —
+  // dan layar user berhenti di satu angka walau prosesnya berjalan.
   let lastUpdate = 0;
   const onProgress = async (p) => {
     const now = Date.now();
-    if (now - lastUpdate < 30000) return;
+    if (!p.paksa && now - lastUpdate < 25000) return;
     lastUpdate = now;
 
     const filled = Math.round(p.percent / 5);
     const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
+
+    const jam = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    const monitorUrl = `http://${session.ip}:8006`;
+
+    // Monitor baru hidup setelah container Windows berjalan, yaitu sesudah
+    // tahap persiapan. Sebelum itu link-nya belum bisa dibuka — dikatakan
+    // apa adanya supaya user tidak mengira ada yang rusak.
+    const monitorSiap = p.phase === 'installing' || p.percent >= 10;
 
     await safeEdit(bot,
       `🔄 *Instalasi sedang berjalan*\n\n` +
       `\`${bar}\` ${p.percent}%\n\n` +
       `🖥️ ${escapeMd(session.windowsVersion.name)}\n` +
       `🌐 ${session.ip}\n` +
-      `📊 ${escapeMd(p.note || '')}\n\n` +
+      `📊 ${escapeMd(p.note || '')}\n` +
+      `🕒 Diperbarui ${jam}\n\n` +
+      `🖥️ *Monitor install via website:*\n` +
+      `${monitorUrl}\n\n` +
+      (monitorSiap
+        ? `_Buka link di atas untuk melihat langsung layar Windows yang sedang ` +
+          `dipasang. Kalau muncul tulisan "NoVNC encountered an error", abaikan ` +
+          `saja dan muat ulang — itu normal saat Windows sedang restart._\n\n`
+        : `_Link monitor baru bisa dibuka setelah persiapan VPS selesai ` +
+          `(sekitar 2-5 menit lagi). Kalau sekarang dibuka masih kosong, ` +
+          `itu wajar._\n\n`) +
+      `_Angka persen bergerak lambat di awal — itu normal, ` +
+      `menyiapkan VPS memang bagian paling lama._\n` +
       `_Jangan matikan VPS. Anda boleh menutup chat ini._`,
       {
         chat_id: chatId,
         message_id: session.messageId,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        // Tombol hanya dipasang setelah monitornya benar-benar bisa dibuka,
+        // supaya user tidak menekan tombol yang pasti gagal.
+        ...(monitorSiap
+          ? {
+              reply_markup: {
+                inline_keyboard: [[{ text: '🖥️ Buka Monitor Instalasi', url: monitorUrl }]]
+              }
+            }
+          : {})
       }
     );
   };

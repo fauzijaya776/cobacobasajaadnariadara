@@ -43,6 +43,10 @@ class BackupTelegram {
     // sidik jari isi yang terakhir benar-benar terkirim.
     this._pesanSebelumnyaId = null;
     this._sidikJariTerkirim = null;
+
+    // Sebagian versi Telegram/library tidak mendukung penyuntingan dokumen.
+    // Kalau sekali gagal, jangan dicoba terus — langsung pakai cara kirim biasa.
+    this._editDidukung = true;
   }
 
   /**
@@ -152,13 +156,40 @@ class BackupTelegram {
       const total = Object.values(data.users || {})
         .reduce((s, u) => s + (Number(u && u.balance) || 0), 0);
 
+      const caption =
+        `💾 Cadangan otomatis\n` +
+        `${new Date().toLocaleString('id-ID')}\n` +
+        `${jumlahUser} user · Rp ${total.toLocaleString('id-ID')}\n\n` +
+        `Jangan hapus atau lepas sematan pesan ini — ` +
+        `dari sinilah data dipulihkan kalau server restart.`;
+
+      /*
+       * Kalau sudah ada pesan cadangan, PERBARUI pesan itu — jangan kirim yang
+       * baru. Mengirim pesan baru berarti: muncul notifikasi, chat melompat ke
+       * bawah, dan pesan penting lain (mis. progres instalasi) terdorong ke atas.
+       * Menyunting membuat file cadangan tetap di tempatnya dan sematannya utuh.
+       */
+      if (this._editDidukung && this._pesanSebelumnyaId) {
+        try {
+          await this.bot.editMessageMedia(
+            { type: 'document', media: berkas, caption },
+            { chat_id: this.chatId, message_id: this._pesanSebelumnyaId }
+          );
+          this._terakhirSukses = Date.now();
+          this._sidikJariTerkirim = this._sidikJari(data);
+          return true;
+        } catch (errEdit) {
+          // Tidak didukung / pesan sudah hilang -> pakai cara biasa mulai sekarang.
+          this._editDidukung = false;
+          console.warn('Menyunting cadangan tidak berhasil, beralih ke kirim ulang:',
+            errEdit.message);
+        }
+      }
+
       const pesan = await this.bot.sendDocument(this.chatId, berkas, {
-        caption:
-          `💾 Cadangan otomatis\n` +
-          `${new Date().toLocaleString('id-ID')}\n` +
-          `${jumlahUser} user · Rp ${total.toLocaleString('id-ID')}\n\n` +
-          `Jangan hapus atau lepas sematan pesan ini — ` +
-          `dari sinilah data dipulihkan kalau server restart.`
+        caption,
+        // Tanpa ini, tiap cadangan membunyikan notifikasi di HP admin.
+        disable_notification: true
       });
 
       if (pesan && pesan.message_id) {
