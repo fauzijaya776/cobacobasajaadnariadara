@@ -38,6 +38,28 @@ class BackupTelegram {
     this._dataTerkirim = null;   // data yang sedang dalam proses pengiriman
     this._gagalBeruntun = 0;
     this.onGagalTerus = null;    // dipanggil kalau cadangan gagal berkali-kali
+
+    // Untuk menjaga chat tetap bersih: id pesan cadangan sebelumnya, dan
+    // sidik jari isi yang terakhir benar-benar terkirim.
+    this._pesanSebelumnyaId = null;
+    this._sidikJariTerkirim = null;
+  }
+
+  /**
+   * Sidik jari isi data, TANPA updated_at.
+   *
+   * Banyak penyimpanan tidak mengubah apa pun yang berarti (mis. status
+   * instalasi disimpan ulang). Tanpa perbandingan ini, tiap penyimpanan
+   * mengirim file baru dan chat admin penuh oleh cadangan yang isinya sama.
+   */
+  _sidikJari(data) {
+    if (!data) return '';
+    return JSON.stringify({
+      users: data.users || {},
+      deposits: data.deposits || {},
+      nTrx: (data.transactions || []).length,
+      nInst: (data.installations || []).length
+    });
   }
 
   /** Apakah ada perubahan yang belum sampai ke Telegram. */
@@ -71,8 +93,15 @@ class BackupTelegram {
 
     const data = this._dataTerbaru;
     this._dataTerbaru = null;
-    this._dataTerkirim = data;
 
+    // Isinya sama persis dengan yang sudah tersimpan di Telegram — tidak perlu
+    // mengirim file lagi. Ini yang mencegah chat penuh oleh cadangan kembar.
+    if (this._sidikJari(data) === this._sidikJariTerkirim) {
+      this._gagalBeruntun = 0;
+      return;
+    }
+
+    this._dataTerkirim = data;
     const berhasil = await this.kirimSekarang(data);
 
     if (berhasil) {
@@ -143,9 +172,24 @@ class BackupTelegram {
           console.error('Cadangan terkirim tapi gagal disemat:', errPin.message);
           return false;
         }
+
+        // Cadangan baru sudah aman tersemat, jadi yang lama boleh dibuang.
+        // Tanpa ini chat admin penuh oleh file cadangan dan notifikasi
+        // penting ikut terkubur. Dihapus SETELAH yang baru tersemat, supaya
+        // tidak pernah ada momen tanpa cadangan sama sekali.
+        if (this._pesanSebelumnyaId && this._pesanSebelumnyaId !== pesan.message_id) {
+          try {
+            await this.bot.deleteMessage(this.chatId, this._pesanSebelumnyaId);
+          } catch (_) {
+            // Telegram melarang bot menghapus pesan yang lebih tua dari 48 jam.
+            // Itu bukan masalah — cukup dilewati.
+          }
+        }
+        this._pesanSebelumnyaId = pesan.message_id;
       }
 
       this._terakhirSukses = Date.now();
+      this._sidikJariTerkirim = this._sidikJari(data);
       return true;
     } catch (error) {
       console.error('Cadangan ke Telegram gagal:', error.message);
@@ -189,6 +233,27 @@ class BackupTelegram {
    *          penting: null berarti aman mulai dari kosong, sedangkan error
    *          berarti data lama mungkin masih ada dan TIDAK BOLEH ditimpa.
    */
+  /**
+   * Catat id pesan cadangan yang sedang tersemat, tanpa mengunduh isinya.
+   *
+   * Dipanggil saat bot start ketika data diambil dari file lokal (jadi
+   * pulihkan() tidak dijalankan). Tanpa ini, cadangan dari sesi sebelumnya
+   * tidak pernah dihapus dan file menumpuk di chat setiap kali bot restart.
+   */
+  async catatSematanTerakhir() {
+    if (!this.aktif) return;
+    try {
+      const chat = await this.bot.getChat(this.chatId);
+      const tersemat = chat && chat.pinned_message;
+      if (tersemat && tersemat.document &&
+          String(tersemat.document.file_name || '').endsWith('.json')) {
+        this._pesanSebelumnyaId = tersemat.message_id;
+      }
+    } catch (_) {
+      // Tidak apa-apa: hanya berarti cadangan lama tidak ikut dibersihkan.
+    }
+  }
+
   async pulihkan() {
     if (!this.aktif) return null;
 
@@ -229,6 +294,12 @@ class BackupTelegram {
     if (!data || typeof data !== 'object' || !data.users) {
       throw new Error('bentuk isi cadangan tidak dikenali');
     }
+
+    // Data ini sudah ada di Telegram, jadi jangan kirim ulang isi yang sama.
+    // Id-nya juga dicatat supaya file lama bisa dihapus saat cadangan berikutnya.
+    this._sidikJariTerkirim = this._sidikJari(data);
+    this._pesanSebelumnyaId = tersemat.message_id;
+
     return data;
   }
 }

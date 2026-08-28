@@ -1,5 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const http = require('http');
+const fs = require('fs');
 require('dotenv').config();
 
 const {
@@ -101,7 +102,15 @@ const cadangan = new BackupTelegram(bot, backupChatId);
 
 async function siapkanData() {
   // Kalau file lokal tidak ada, coba pulihkan dari cadangan Telegram dulu.
+  const adaFileLokal = fs.existsSync(store.filePath);
   await store.init(() => cadangan.pulihkan());
+
+  // Kalau data diambil dari file lokal, pulihkan() tidak dijalankan sehingga
+  // id cadangan lama tidak diketahui. Catat sekarang supaya file cadangan dari
+  // sesi sebelumnya ikut dibersihkan, bukan menumpuk tiap kali bot restart.
+  if (adaFileLokal) {
+    await cadangan.catatSematanTerakhir();
+  }
 
   // Setiap penyimpanan ke disk memicu cadangan (digabung otomatis, tidak spam).
   store.onChange = (data) => cadangan.jadwalkan(data);

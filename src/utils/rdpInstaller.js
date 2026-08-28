@@ -221,7 +221,7 @@ async function installRDP(target, config, hooks = {}) {
   /* ---------- Tahap 1: persiapan host + unduh script ---------- */
   if (onProgress) onProgress({ phase: 'prepare', percent: 5, note: 'Menyiapkan VPS' });
 
-  let conn = await ssh.connect(target);
+  let conn = await ssh.connectWithRetry(target, { percobaan: 3, onLog: log });
   let prep;
   try {
     prep = await ssh.exec(conn, buildPrepareCommand({ scriptUrl, swapGb }), {
@@ -247,7 +247,7 @@ async function installRDP(target, config, hooks = {}) {
   /* ---------- Tahap 2: jalankan installer secara detached ---------- */
   if (onProgress) onProgress({ phase: 'launch', percent: 10, note: 'Memulai instalasi' });
 
-  conn = await ssh.connect(target);
+  conn = await ssh.connectWithRetry(target, { percobaan: 3, onLog: log });
   let launch;
   try {
     launch = await ssh.exec(conn, buildLaunchCommand(config), {

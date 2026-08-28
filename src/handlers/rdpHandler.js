@@ -288,7 +288,8 @@ async function handlePasswordInput(bot, chatId, text, session, userSessions) {
 
   let conn;
   try {
-    conn = await ssh.connect(target);
+    // Percobaan ulang otomatis: ECONNRESET dari VPS hampir selalu sesaat.
+    conn = await ssh.connectWithRetry(target, { percobaan: 3 });
   } catch (error) {
     return reportConnectionError(bot, chatId, session, userSessions, error);
   }
@@ -391,6 +392,20 @@ async function reportConnectionError(bot, chatId, session, userSessions, error) 
       '`user@IP:PORT` (contoh: `ubuntu@1.2.3.4:22`).',
     SSH_REFUSED: `❌ *Koneksi ditolak*\n\n${escapeMd(detail)}\n\nCek apakah layanan SSH berjalan.`,
     SSH_TIMEOUT: `❌ *VPS tidak merespons*\n\n${escapeMd(detail)}\n\nCek firewall dan status VPS.`,
+    SSH_RESET:
+      `❌ *Koneksi diputus oleh VPS*\n\n${escapeMd(detail)}\n\n` +
+      `Bot sudah mencoba 3 kali dan tetap diputus. Penyebab yang paling sering:\n\n` +
+      `• *Firewall / anti-DDoS provider* memblokir IP bot. Ini yang paling umum. ` +
+      `Coba matikan sementara proteksi DDoS di panel VPS, atau masukkan IP bot ke daftar putih.\n` +
+      `• *fail2ban* memblokir karena percobaan login sebelumnya gagal. ` +
+      `Jalankan \`fail2ban-client unban --all\` lewat konsol VPS.\n` +
+      `• VPS baru menyala dan SSH belum siap — tunggu 1-2 menit.\n` +
+      `• VPS sedang kelebihan beban.\n\n` +
+      `Coba akses VPS lewat konsol panel provider untuk memastikan VPS-nya sendiri sehat.`,
+    SSH_HANDSHAKE:
+      `❌ *Versi SSH tidak cocok*\n\n${escapeMd(detail.slice(0, 200))}\n\n` +
+      `VPS Anda memakai algoritma enkripsi yang tidak didukung. ` +
+      `Biasanya terjadi pada OS yang sangat lama. Pakai Ubuntu 20.04 ke atas.`,
     SSH_DNS: '❌ *IP tidak ditemukan*\n\nPastikan IP yang dimasukkan benar.',
     KVM_CHECK_INCOMPLETE: '❌ *Gagal memeriksa dukungan KVM*\n\nVPS terhubung tapi perintah pemeriksaan tidak selesai.',
     SPEC_INCOMPLETE: '❌ *Gagal membaca spesifikasi VPS*\n\nVPS terhubung tapi perintah tidak selesai. Pastikan OS-nya Ubuntu/Debian standar.',
