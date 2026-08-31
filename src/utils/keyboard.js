@@ -5,6 +5,8 @@
  */
 const BUTTON = {
   INSTALL: '🖥️ Install RDP',
+  MULTI: '📦 Multi Install',
+  CREATE_VPS: '☁️ Buat VPS',
   DEPOSIT: '💰 Deposit',
   BALANCE: '💳 Cek Saldo',
   FAQ: '❓ FAQ',
@@ -17,6 +19,10 @@ function createMainMenu(isAdmin = false) {
   const keyboard = [
     [
       { text: BUTTON.INSTALL, callback_data: 'install_rdp' },
+      { text: BUTTON.MULTI, callback_data: 'multi_start' }
+    ],
+    [
+      { text: BUTTON.CREATE_VPS, callback_data: 'do_start' },
       { text: BUTTON.DEPOSIT, callback_data: 'deposit' }
     ],
     [
@@ -46,7 +52,8 @@ function createPersistentKeyboard() {
   return {
     reply_markup: {
       keyboard: [
-        [{ text: BUTTON.INSTALL }, { text: BUTTON.DEPOSIT }],
+        [{ text: BUTTON.INSTALL }, { text: BUTTON.MULTI }],
+        [{ text: BUTTON.CREATE_VPS }, { text: BUTTON.DEPOSIT }],
         [{ text: BUTTON.BALANCE }, { text: BUTTON.FAQ }],
         [{ text: BUTTON.MENU }]
       ],
@@ -63,12 +70,14 @@ function createPersistentKeyboard() {
  * daftar perintah ini — bisa diklik, tidak perlu diketik.
  */
 const BOT_COMMANDS = [
-  { command: 'start',   description: '🏠 Buka menu utama' },
-  { command: 'install', description: '🖥️ Install RDP Windows' },
-  { command: 'deposit', description: '💰 Isi saldo' },
-  { command: 'saldo',   description: '💳 Cek saldo' },
-  { command: 'faq',     description: '❓ Bantuan & panduan' },
-  { command: 'batal',   description: '❌ Batalkan proses berjalan' }
+  { command: 'start',        description: '🏠 Buka menu utama' },
+  { command: 'install',      description: '🖥️ Install RDP Windows' },
+  { command: 'multiinstall', description: '📦 Install RDP ke banyak VPS' },
+  { command: 'createvps',    description: '☁️ Buat VPS via DigitalOcean' },
+  { command: 'deposit',      description: '💰 Isi saldo' },
+  { command: 'saldo',        description: '💳 Cek saldo' },
+  { command: 'faq',          description: '❓ Bantuan & panduan' },
+  { command: 'batal',        description: '❌ Batalkan proses berjalan' }
 ];
 
 module.exports = {

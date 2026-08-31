@@ -22,24 +22,26 @@ const {
   updateInstallation
 } = require('../utils/userManager');
 const { safeEdit, safeSend, safeDelete, escapeMd } = require('../utils/telegram');
+const installLock = require('../utils/installLock');
+const { isValidRdpPassword, RDP_PASSWORD_RULE } = require('../utils/password');
 
 const MIN_CPU = 2;
 const MIN_RAM = 4;
 const MIN_STORAGE = 25;
 
 /**
- * Daftar user yang instalasinya sedang BENAR-BENAR berjalan.
+ * Penanda user yang instalasinya sedang BENAR-BENAR berjalan kini disimpan di
+ * modul bersama `installLock`, bukan Set privat di sini.
  *
- * Ini terpisah dari userSessions dengan sengaja. Menghapus session (lewat
- * tombol Batal, sesi kadaluarsa, atau /start) TIDAK menghentikan instalasi
- * yang sudah jalan di VPS — prosesnya hidup di dalam closure dan tetap lanjut.
- * Kalau penjaganya cuma session, user bisa: mulai instalasi A, tekan Batal,
- * lalu mulai instalasi B, dan mendapat dua RDP dengan satu kali bayar
- * (saldo baru dipotong di akhir, dan cek saldo di awal lolos dua-duanya).
+ * Alasannya sama seperti sebelumnya — menghapus session (lewat tombol Batal,
+ * sesi kadaluarsa, atau /start) TIDAK menghentikan instalasi yang sudah jalan
+ * di VPS, jadi butuh penjaga terpisah supaya user tidak bisa memulai instalasi
+ * kedua dan mendapat dua RDP dengan satu kali bayar. Yang berubah: sekarang
+ * kunci itu DIBAGI dengan fitur multi-install, supaya install satuan dan batch
+ * multi tidak bisa berjalan bersamaan pada user yang sama.
  *
- * Set ini hanya dibersihkan di `finally` setelah instalasi benar-benar selesai.
+ * Kunci hanya dilepas di `finally` setelah instalasi benar-benar selesai.
  */
-const activeInstalls = new Set();
 
 /** Langkah-langkah yang termasuk alur instalasi (bukan deposit/broadcast). */
 const INSTALL_STEPS = new Set([
@@ -52,7 +54,7 @@ const INSTALL_STEPS = new Set([
 ]);
 
 function isInstalling(chatId) {
-  return activeInstalls.has(chatId);
+  return installLock.isLocked(chatId);
 }
 
 const cancelKeyboard = {
@@ -576,7 +578,7 @@ function buildRdpPasswordPrompt(session, errorNote = null) {
     `• RAM: ${c.ram} GB\n` +
     `• Storage: ${c.storage} GB\n\n` +
     `🔑 *Masukkan password untuk RDP Windows:*\n` +
-    `_Minimal 8 karakter, harus ada huruf dan angka_\n` +
+    `_${RDP_PASSWORD_RULE}_\n` +
     `Contoh: \`Fauzi2024\`` +
     (errorNote ? `\n\n❌ ${errorNote}` : '')
   );
@@ -588,9 +590,9 @@ function buildRdpPasswordPrompt(session, errorNote = null) {
 async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) {
   const password = String(text || '');
 
-  if (password.length < 8 || !/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/.test(password)) {
+  if (!isValidRdpPassword(password)) {
     await safeEdit(bot,
-      buildRdpPasswordPrompt(session, 'Password harus minimal 8 karakter, hanya huruf dan angka, dan mengandung keduanya.'),
+      buildRdpPasswordPrompt(session, RDP_PASSWORD_RULE),
       {
         chat_id: chatId,
         message_id: session.messageId,
@@ -607,8 +609,8 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
   userSessions.set(chatId, session);
 
   // Kunci instalasi. Dari titik ini sampai `finally`, user tidak bisa memulai
-  // instalasi kedua — bahkan kalau session-nya dihapus.
-  activeInstalls.add(chatId);
+  // instalasi kedua (satuan maupun batch) — bahkan kalau session-nya dihapus.
+  installLock.lock(chatId);
 
   const installationId = await recordInstallation(chatId, {
     ip: session.ip,
@@ -721,7 +723,7 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
   }
 
   if (!installSucceeded) {
-    activeInstalls.delete(chatId);
+    installLock.unlock(chatId);
     session.step = 'done';
     userSessions.delete(chatId);
     return;
@@ -791,7 +793,7 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
       `Monitor: http://${session.ip}:8006\n\n` +
       `Terjadi kendala saat menampilkan detail lengkap. Hubungi admin bila perlu.`);
   } finally {
-    activeInstalls.delete(chatId);
+    installLock.unlock(chatId);
     session.step = 'done';
     userSessions.delete(chatId);
   }

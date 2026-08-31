@@ -22,6 +22,18 @@ const {
   MIN_RAM,
   MIN_STORAGE
 } = require('./handlers/rdpHandler');
+const {
+  DO_STEPS,
+  startDO,
+  handleDOText,
+  handleDOCallback
+} = require('./handlers/doHandler');
+const {
+  MULTI_STEPS,
+  startMultiInstall,
+  handleMultiText,
+  handleMultiCallback
+} = require('./handlers/multiInstallHandler');
 const { handleDeposit, handleDepositAmount } = require('./handlers/depositHandler');
 const { handleFAQ } = require('./handlers/faqHandler');
 const { handleProviders } = require('./handlers/providerHandler');
@@ -205,7 +217,8 @@ setInterval(() => {
 function hasActiveInstall(chatId) {
   if (isInstalling(chatId)) return true;
   const s = userSessions.get(chatId);
-  return Boolean(s && s.step && INSTALL_STEPS.has(s.step));
+  if (!s || !s.step) return false;
+  return INSTALL_STEPS.has(s.step) || DO_STEPS.has(s.step) || MULTI_STEPS.has(s.step);
 }
 
 async function buildMenuText(chatId) {
@@ -223,10 +236,11 @@ async function buildMenuText(chatId) {
     `• Storage: ${MIN_STORAGE} GB kosong\n\n` +
     `🔥 *Fitur Unggulan:*\n` +
     `• Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per install\n` +
+    `• 📦 *Multi Install* — banyak VPS sekaligus\n` +
+    `• ☁️ *Buat VPS* via DigitalOcean (Rp 1.000 flat)\n` +
     `• *RAM tidak dikurangi* — dialokasikan penuh\n` +
     `• Deteksi port SSH otomatis\n` +
     `• Saldo hanya terpotong kalau instalasi berhasil\n` +
-    `• Instalasi otomatis, banyak versi Windows\n` +
     `• Support 24/7 — wa.me/6285173329868\n\n` +
     `Silakan pilih menu di bawah ini:`;
 }
@@ -282,6 +296,20 @@ bot.onText(/^\/install\b/, async (msg) => {
   const chatId = msg.chat.id;
   await ensurePersistentKeyboard(chatId);
   await runOnFreshMessage(chatId, (mid) => handleInstallRDP(bot, chatId, mid, userSessions));
+});
+
+bot.onText(/^\/multiinstall\b/, async (msg) => {
+  await dataSiap;
+  const chatId = msg.chat.id;
+  await ensurePersistentKeyboard(chatId);
+  await runOnFreshMessage(chatId, (mid) => startMultiInstall(bot, chatId, mid, userSessions));
+});
+
+bot.onText(/^\/createvps\b/, async (msg) => {
+  await dataSiap;
+  const chatId = msg.chat.id;
+  await ensurePersistentKeyboard(chatId);
+  await runOnFreshMessage(chatId, (mid) => startDO(bot, chatId, mid, userSessions));
 });
 
 bot.onText(/^\/deposit\b/, async (msg) => {
@@ -356,6 +384,14 @@ async function handleKeyboardButton(chatId, text) {
   switch (text) {
     case BUTTON.INSTALL:
       await runOnFreshMessage(chatId, (mid) => handleInstallRDP(bot, chatId, mid, userSessions));
+      break;
+
+    case BUTTON.MULTI:
+      await runOnFreshMessage(chatId, (mid) => startMultiInstall(bot, chatId, mid, userSessions));
+      break;
+
+    case BUTTON.CREATE_VPS:
+      await runOnFreshMessage(chatId, (mid) => startDO(bot, chatId, mid, userSessions));
       break;
 
     case BUTTON.DEPOSIT:
@@ -442,6 +478,17 @@ bot.on('message', async (msg) => {
       return;
     }
 
+    // Alur "Buat VPS" dan "Multi Install" punya penanganan teks sendiri
+    // (token DO, password root, daftar VPS, password RDP).
+    if (session.flow === 'do') {
+      await handleDOText(bot, msg, userSessions);
+      return;
+    }
+    if (session.flow === 'multi') {
+      await handleMultiText(bot, msg, userSessions);
+      return;
+    }
+
     await handleVPSCredentials(bot, msg, userSessions);
   } catch (error) {
     console.error('Error handling message:', error);
@@ -467,6 +514,23 @@ bot.on('callback_query', async (query) => {
     if (data.startsWith('windows_')) {
       await handleWindowsSelection(bot, query, userSessions);
       return await safeAnswer(bot, query.id);
+    }
+
+    // Semua tombol alur "Buat VPS" (termasuk 'do_start' dari menu).
+    // Callback dijawab DULU: sebagian aksi (menunggu droplet siap) bisa makan
+    // waktu menit, dan Telegram menganggap callback kadaluarsa setelah ~15 detik.
+    if (data.startsWith('do_')) {
+      await safeAnswer(bot, query.id);
+      await handleDOCallback(bot, query, userSessions);
+      return;
+    }
+
+    // Semua tombol alur "Multi Install" (termasuk 'multi_start' dari menu,
+    // 'multi_win_*', dan 'multi_page_*').
+    if (data.startsWith('multi_')) {
+      await safeAnswer(bot, query.id);
+      await handleMultiCallback(bot, query, userSessions);
+      return;
     }
 
     switch (data) {
