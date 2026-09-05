@@ -45,6 +45,7 @@ const { safeEdit, safeSend, safeAnswer } = require('./utils/telegram');
 const DatabaseBackup = require('./utils/dbBackup');
 const store = require('./utils/store');
 const BackupTelegram = require('./utils/backupTelegram');
+const qrin = require('./utils/qrin');
 
 /* ============ Validasi environment ============ */
 if (!process.env.BOT_TOKEN) {
@@ -57,9 +58,79 @@ if (!process.env.ADMIN_ID) {
 
 /* ============ Web service (Render butuh port terbuka) ============ */
 const port = Number(process.env.PORT) || 3000;
-const paymentGateway = 'dompetx';
+const paymentGateway = 'qrin';
+
+/**
+ * Proses satu callback QRIN (dipanggil setelah tanda tangan diverifikasi).
+ * QRIN mengirim { no_ref_merchant, status, jumlah_dibayar, ... }.
+ * Idempoten: store.creditDeposit menandai depositId permanen, jadi callback
+ * ganda/ulang tidak akan menambah saldo dua kali.
+ */
+async function prosesCallbackQrin(data) {
+  const ref = data && data.no_ref_merchant;
+  const status = String((data && data.status) || '').toLowerCase();
+  console.log(`[QRIN CALLBACK] ref=${ref} status=${status}`);
+  if (!ref || status !== 'success') return;
+
+  // Pastikan data saldo sudah dimuat/dipulihkan sebelum mengkredit.
+  await dataSiap;
+
+  const pending = store.getPendingDeposit(ref);
+  if (!pending) {
+    // Ref ini tidak dikenal bot ini. Bisa jadi milik bot lain yang memakai
+    // merchant QRIN yang sama. Diabaikan dengan aman.
+    console.warn(`[QRIN CALLBACK] ref ${ref} tidak ada di daftar tunggu bot ini — diabaikan.`);
+    return;
+  }
+
+  const hasil = store.creditDeposit(pending.user_id, pending.amount, ref, 'deposit');
+  store.removePendingDeposit(ref);
+
+  if (hasil.ok && !hasil.duplikat) {
+    safeSend(bot, pending.user_id,
+      `✅ *Pembayaran Berhasil!*\n\nSaldo bertambah *Rp ${Number(pending.amount).toLocaleString('id-ID')}*`,
+      { parse_mode: 'Markdown' }
+    ).catch(() => {});
+  }
+}
 
 const webServer = http.createServer((req, res) => {
+  // ===== Webhook / Callback QRIN =====
+  // QRIN mengirim POST ke URL callback merchant. Terima /callback & /qrin/callback.
+  if (req.method === 'POST' && (req.url === '/callback' || req.url === '/qrin/callback')) {
+    const chunks = [];
+    let tooBig = false;
+    req.on('data', (c) => {
+      chunks.push(c);
+      if (chunks.reduce((n, b) => n + b.length, 0) > 1_000_000) { tooBig = true; req.destroy(); }
+    });
+    req.on('end', async () => {
+      if (tooBig) return;
+      const raw = Buffer.concat(chunks);
+      try {
+        const signature = req.headers['x-callback-signature'];
+        if (!qrin.verifyCallbackSignature(raw, signature)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: false, message: 'Invalid signature' }));
+        }
+        let data;
+        try { data = JSON.parse(raw.toString('utf8')); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: false, message: 'Invalid JSON' }));
+        }
+        await prosesCallbackQrin(data);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        console.error('[QRIN CALLBACK] Error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false }));
+      }
+    });
+    return;
+  }
+
   const isHealthCheck = req.url === '/health';
   const body = isHealthCheck
     ? JSON.stringify({
@@ -70,9 +141,10 @@ const webServer = http.createServer((req, res) => {
         activeSessions: userSessions.size,
         storage: 'json-file',
         users: store.stats().users,
-        autoBackup: Boolean(backupChatId)
+        autoBackup: Boolean(backupChatId),
+        qrinConfigured: Boolean(process.env.QRIN_TOKEN)
       })
-    : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS DompetX sedang berjalan.</p></body></html>';
+    : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS QRIN sedang berjalan.</p></body></html>';
 
   res.writeHead(200, {
     'Content-Type': isHealthCheck ? 'application/json; charset=utf-8' : 'text/html; charset=utf-8'
@@ -227,22 +299,14 @@ async function buildMenuText(chatId) {
     ? 'Unlimited'
     : `Rp ${Number(balance).toLocaleString('id-ID')}`;
 
-  return `🚀 *Selamat datang di Bot Instalasi RDP!*\n\n` +
+  return `🚀 *Bot Instalasi RDP*\n\n` +
     `👤 ID: \`${chatId}\`\n` +
     `💰 Saldo: ${balanceText}\n\n` +
-    `⚡️ *Spesifikasi Minimal VPS:*\n` +
-    `• CPU: ${MIN_CPU} Core\n` +
-    `• RAM: ${MIN_RAM} GB\n` +
-    `• Storage: ${MIN_STORAGE} GB kosong\n\n` +
-    `🔥 *Fitur Unggulan:*\n` +
-    `• Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per install\n` +
-    `• 📦 *Multi Install* — banyak VPS sekaligus\n` +
-    `• ☁️ *Buat VPS* via DigitalOcean (Rp 1.000 flat)\n` +
-    `• *RAM tidak dikurangi* — dialokasikan penuh\n` +
-    `• Deteksi port SSH otomatis\n` +
-    `• Saldo hanya terpotong kalau instalasi berhasil\n` +
-    `• Support 24/7 — wa.me/6285173329868\n\n` +
-    `Silakan pilih menu di bawah ini:`;
+    `Ubah VPS Ubuntu jadi RDP Windows. Rp ${INSTALLATION_COST.toLocaleString('id-ID')}/VPS, ` +
+    `saldo terpotong hanya kalau instalasi berhasil.\n\n` +
+    `⚡️ *Syarat VPS:* ${MIN_CPU} Core · ${MIN_RAM} GB RAM · ${MIN_STORAGE} GB storage kosong\n` +
+    `🆘 Bantuan: wa.me/6285173329868\n\n` +
+    `Pilih menu di bawah:`;
 }
 
 /** Kirim menu utama sebagai pesan baru (dengan tombol inline). */

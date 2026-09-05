@@ -169,11 +169,20 @@ async function handleTargetsInput(bot, chatId, text, session, userSessions) {
   const valid = [];
   const errors = [];
 
+  const seenIp = new Set();
+  let kembar = 0;
   for (const line of lines) {
     const parsed = parseTargetLine(line);
     if (parsed === null) continue;
     if (parsed.error) { errors.push(`• \`${escapeMd(parsed.raw)}\` — ${parsed.error}`); continue; }
+    // Buang IP kembar dalam satu batch: satu VPS tidak boleh dipasang & ditagih
+    // dua kali hanya karena barisnya ter-paste dua kali.
+    if (seenIp.has(parsed.ip)) { kembar++; continue; }
+    seenIp.add(parsed.ip);
     valid.push(parsed);
+  }
+  if (kembar > 0) {
+    errors.push(`• ${kembar} baris dilewati karena IP sama (VPS kembar).`);
   }
 
   if (valid.length === 0) {

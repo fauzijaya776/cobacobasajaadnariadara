@@ -38,7 +38,12 @@ function dataKosong() {
     // Daftar ID pembayaran yang SUDAH dikreditkan. Disimpan permanen (bukan
     // cuma di memori) supaya satu pembayaran tidak pernah dikreditkan dua kali,
     // bahkan kalau bot restart di tengah proses.
-    deposits: {}
+    deposits: {},
+    // Deposit QRIN yang MENUNGGU dibayar: ref -> { user_id, amount, at }.
+    // Karena QRIN mengonfirmasi lewat webhook (bukan polling), pemetaan
+    // ref->user harus PERMANEN supaya callback yang datang setelah bot restart
+    // tetap tahu saldo siapa yang harus ditambah.
+    pendingDeposits: {}
   };
 }
 
@@ -177,6 +182,10 @@ class Store {
     // Penanda deposit yang sudah dikreditkan. Wajib ikut dipulihkan dari
     // cadangan, kalau tidak pembayaran lama bisa dikreditkan ulang.
     d.deposits = (obj.deposits && typeof obj.deposits === 'object') ? obj.deposits : {};
+
+    // Deposit QRIN yang masih menunggu dibayar (ref -> {user_id, amount, at}).
+    d.pendingDeposits = (obj.pendingDeposits && typeof obj.pendingDeposits === 'object')
+      ? obj.pendingDeposits : {};
 
     // Nomor urut dihitung sekali di sini. Memakai Math.max(...array) tiap kali
     // menambah data akan melempar RangeError begitu riwayat melewati ~126.000
@@ -389,6 +398,41 @@ class Store {
       .sort((a, b) => String(this.data.deposits[a].at).localeCompare(String(this.data.deposits[b].at)))
       .slice(0, kunci.length - Math.floor(MAX_DEPOSITS * 0.8))
       .forEach((k) => delete this.data.deposits[k]);
+  }
+
+  /* ═══════════════ Deposit QRIN yang menunggu (webhook) ═══════════════ */
+
+  /** Catat deposit QRIN yang menunggu dibayar. Disimpan permanen + dicadangkan. */
+  addPendingDeposit(ref, userId, amount) {
+    if (!ref) return false;
+    if (!this.data.pendingDeposits) this.data.pendingDeposits = {};
+    this.data.pendingDeposits[String(ref)] = {
+      user_id: Number(userId),
+      amount: Number(amount),
+      at: new Date().toISOString()
+    };
+    // Batasi agar tidak menumpuk selamanya (buang yang paling lama).
+    const kunci = Object.keys(this.data.pendingDeposits);
+    if (kunci.length > MAX_DEPOSITS) {
+      kunci
+        .sort((a, b) => String(this.data.pendingDeposits[a].at).localeCompare(String(this.data.pendingDeposits[b].at)))
+        .slice(0, kunci.length - Math.floor(MAX_DEPOSITS * 0.8))
+        .forEach((k) => delete this.data.pendingDeposits[k]);
+    }
+    return this.saveNow();
+  }
+
+  getPendingDeposit(ref) {
+    if (!ref || !this.data.pendingDeposits) return null;
+    return this.data.pendingDeposits[String(ref)] || null;
+  }
+
+  removePendingDeposit(ref) {
+    if (!ref || !this.data.pendingDeposits) return;
+    if (this.data.pendingDeposits[String(ref)]) {
+      delete this.data.pendingDeposits[String(ref)];
+      this.saveNow();
+    }
   }
 
   _buatCatatan(userId, amount, type) {

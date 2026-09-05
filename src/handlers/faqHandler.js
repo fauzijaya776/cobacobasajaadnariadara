@@ -1,58 +1,29 @@
 async function handleFAQ(bot, chatId, messageId) {
   const faqText =
-`❓ *FAQ - Pertanyaan Umum*
+`❓ *FAQ Singkat*
+
+🖥️ *Install RDP*
+Ubah VPS Ubuntu jadi Windows RDP. Kirim IP + password VPS, pilih Windows, tunggu. Rp 1.000/VPS, saldo terpotong hanya kalau berhasil.
+
+📦 *Multi Install*
+Pasang RDP ke banyak VPS sekaligus (1 baris = 1 VPS: \`ip password\`).
 
 ☁️ *Buat VPS (DigitalOcean)*
-Bikin VPS baru langsung dari bot pakai akun DigitalOcean kamu sendiri.
+Bikin VPS baru pakai token DO kamu sendiri (scope *Write*). Rp 1.000 flat 1–10 VPS; sewa VPS ditagih DO ke akunmu.
 
-*Cara pakai:*
-1. Klik menu ☁️ Buat VPS.
-2. Kirim Personal Access Token DigitalOcean (harus scope *Write*). Ambil di: cloud.digitalocean.com → API → Tokens → Generate New Token (centang Write).
-3. Pilih region → ukuran → OS → jumlah droplet (1-10).
-4. Kirim password root, atau tekan 🎲 Buatkan otomatis.
-5. Bot bikin VPS lalu kirim IP + user \`root\` + password.
+💰 *Deposit*
+Isi saldo via QRIS. Saldo masuk otomatis setelah dibayar.
 
-*Biaya:* Rp 1.000 flat per proses — mau bikin 1 atau 10 VPS tetap Rp 1.000. Sewa VPS-nya sendiri ditagih DigitalOcean langsung ke akun kamu.
+🔑 *Aturan Password*
+• RDP Windows: huruf + angka, min 8. Contoh \`Fauzi2024\`
+• Root VPS (DO): wajib simbol + huruf besar/kecil + angka, karakter terakhir huruf. Contoh \`@Mbahfauzi2025x\`
 
-*Password root VPS:* wajib ada simbol, huruf besar, huruf kecil, dan angka, serta karakter terakhir HARUS huruf.
-Contoh: \`@Mbahfauzi2025digital\`
-Simbol yang boleh: \`!@#%^&*()_-+=.,?\`
+💡 *Tips*
+• Kalau muncul "NoVNC Encountered An Error" saat monitoring, abaikan — tunggu 10–60 menit sampai selesai.
+• Bisa jalankan beberapa instalasi sekaligus.
+• Setelah RDP jadi, set *Account lockout threshold* = 0 (secpol.msc → Account Policies → Account Lockout Policy) biar akun tak terkunci.
 
-*Catatan:*
-• Token & password otomatis dihapus dari chat.
-• Login password aktif ~1 menit setelah VPS menyala.
-• VPS yang sudah jadi bisa langsung dipasang RDP lewat menu 🖥️ Install RDP.
-
-━━━━━━━━━━━━━━
-
-🖥️ *Install RDP & 📦 Multi Install*
-Ubah VPS Ubuntu jadi Windows RDP. Multi Install memasang ke banyak VPS sekaligus (Rp 1.000 per VPS).
-*Password RDP Windows:* cukup huruf dan angka, minimal 8. Contoh: \`Fauzi2024\`.
-
-_Beda dengan password VPS di atas ya: RDP tanpa simbol, VPS wajib pakai simbol._
-
-━━━━━━━━━━━━━━
-
-🔒 *Langkah Wajib Setelah Proses Installasi RDP Selesai*
-
-*1. Mengatur Account Lockout Threshold Jadi Nol*
-
-Langkah pertama ini bakal bikin akun kamu nggak akan terkunci lagi walaupun ada beberapa kali login gagal. Cocok banget buat menghindari gangguan penguncian akun.
-
-*Caranya:*
-1. Tekan tombol Windows + R, ketik secpol.msc, lalu tekan Enter.
-2. Ini akan membuka jendela Local Security Policy.
-3. Pergi ke Account Policies > Account Lockout Policy.
-4. Cari Account lockout threshold, klik dua kali.
-5. Ubah nilainya jadi 0 (nol), lalu klik OK.
-
-*TIPS TAMBAHAN*
-
-1. Tekan Monitor Insttalation Untuk Melihat proses installasinya.
-2. Jika Muncul Pesan "NoVNC Encountered An Error" di monitoring installation, abaikan saja, tunggu 10 menit-1 jam sampai proses benar-benar selesai.
-3. Sambil menunggu, anda dapat melakukan instalasi lain secara bersamaan.
-4. Jika ingin bertanya, hubungi admin di wa.me/6285173329868.
-5. Untuk memulai bot lagi, ketik /start`;
+🆘 Admin: wa.me/6285173329868 · Ketik /start untuk buka menu.`;
 
   await bot.editMessageText(faqText, {
     chat_id: chatId,
