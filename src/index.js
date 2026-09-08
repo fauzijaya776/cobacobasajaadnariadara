@@ -34,7 +34,12 @@ const {
   handleMultiText,
   handleMultiCallback
 } = require('./handlers/multiInstallHandler');
-const { handleDeposit, handleDepositAmount } = require('./handlers/depositHandler');
+const {
+  handleDeposit,
+  handleDepositAmount,
+  handleDepositCheck,
+  verifyAndCreditDeposit
+} = require('./handlers/depositHandler');
 const { handleFAQ } = require('./handlers/faqHandler');
 const { handleProviders } = require('./handlers/providerHandler');
 const broadcastMessage = require('./handlers/broadcastMessage');
@@ -45,7 +50,7 @@ const { safeEdit, safeSend, safeAnswer } = require('./utils/telegram');
 const DatabaseBackup = require('./utils/dbBackup');
 const store = require('./utils/store');
 const BackupTelegram = require('./utils/backupTelegram');
-const qrin = require('./utils/qrin');
+const pakasir = require('./utils/pakasir');
 
 /* ============ Validasi environment ============ */
 if (!process.env.BOT_TOKEN) {
@@ -58,46 +63,42 @@ if (!process.env.ADMIN_ID) {
 
 /* ============ Web service (Render butuh port terbuka) ============ */
 const port = Number(process.env.PORT) || 3000;
-const paymentGateway = 'qrin';
+const paymentGateway = 'pakasir';
 
 /**
- * Proses satu callback QRIN (dipanggil setelah tanda tangan diverifikasi).
- * QRIN mengirim { no_ref_merchant, status, jumlah_dibayar, ... }.
- * Idempoten: store.creditDeposit menandai depositId permanen, jadi callback
+ * Proses satu callback Pakasir.
+ *
+ * Pakasir mengirim POST ke URL callback merchant saat status berubah, dengan
+ * body { amount, order_id, project, status, payment_method, completed_at }.
+ *
+ * PENTING: webhook Pakasir TIDAK bertanda tangan, jadi isinya tidak boleh
+ * dipercaya mentah-mentah. Yang dipakai dari body hanyalah `order_id` untuk
+ * menemukan deposit yang menunggu — status LUNAS-nya diverifikasi ulang ke
+ * STATUS API Pakasir di dalam verifyAndCreditDeposit sebelum saldo ditambah.
+ *
+ * Idempoten: store.creditDeposit menandai order_id permanen, jadi callback
  * ganda/ulang tidak akan menambah saldo dua kali.
  */
-async function prosesCallbackQrin(data) {
-  const ref = data && data.no_ref_merchant;
+async function prosesCallbackPakasir(data) {
+  const ref = data && data.order_id;
   const status = String((data && data.status) || '').toLowerCase();
-  console.log(`[QRIN CALLBACK] ref=${ref} status=${status}`);
-  if (!ref || status !== 'success') return;
+  console.log(`[PAKASIR CALLBACK] order_id=${ref} status=${status}`);
+  if (!ref) return;
 
   // Pastikan data saldo sudah dimuat/dipulihkan sebelum mengkredit.
   await dataSiap;
 
-  const pending = store.getPendingDeposit(ref);
-  if (!pending) {
-    // Ref ini tidak dikenal bot ini. Bisa jadi milik bot lain yang memakai
-    // merchant QRIN yang sama. Diabaikan dengan aman.
-    console.warn(`[QRIN CALLBACK] ref ${ref} tidak ada di daftar tunggu bot ini — diabaikan.`);
-    return;
-  }
-
-  const hasil = store.creditDeposit(pending.user_id, pending.amount, ref, 'deposit');
-  store.removePendingDeposit(ref);
-
-  if (hasil.ok && !hasil.duplikat) {
-    safeSend(bot, pending.user_id,
-      `✅ *Pembayaran Berhasil!*\n\nSaldo bertambah *Rp ${Number(pending.amount).toLocaleString('id-ID')}*`,
-      { parse_mode: 'Markdown' }
-    ).catch(() => {});
+  const hasil = await verifyAndCreditDeposit(bot, ref);
+  if (hasil.state === 'unknown') {
+    console.warn(`[PAKASIR CALLBACK] order_id ${ref} tidak ada di daftar tunggu bot ini — diabaikan.`);
   }
 }
 
 const webServer = http.createServer((req, res) => {
-  // ===== Webhook / Callback QRIN =====
-  // QRIN mengirim POST ke URL callback merchant. Terima /callback & /qrin/callback.
-  if (req.method === 'POST' && (req.url === '/callback' || req.url === '/qrin/callback')) {
+  // ===== Webhook / Callback Pakasir =====
+  // Pakasir mengirim POST ke URL callback merchant (mis. https://domain/callback).
+  // Terima /callback & /pakasir/callback.
+  if (req.method === 'POST' && (req.url === '/callback' || req.url === '/pakasir/callback')) {
     const chunks = [];
     let tooBig = false;
     req.on('data', (c) => {
@@ -108,24 +109,23 @@ const webServer = http.createServer((req, res) => {
       if (tooBig) return;
       const raw = Buffer.concat(chunks);
       try {
-        const signature = req.headers['x-callback-signature'];
-        if (!qrin.verifyCallbackSignature(raw, signature)) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ success: false, message: 'Invalid signature' }));
-        }
         let data;
         try { data = JSON.parse(raw.toString('utf8')); }
         catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ success: false, message: 'Invalid JSON' }));
         }
-        await prosesCallbackQrin(data);
+        // Balas 200 dulu supaya Pakasir tidak menganggap webhook gagal; kredit
+        // saldo diverifikasi ulang ke API Pakasir di latar belakang.
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
+        await prosesCallbackPakasir(data);
       } catch (e) {
-        console.error('[QRIN CALLBACK] Error:', e.message);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false }));
+        console.error('[PAKASIR CALLBACK] Error:', e.message);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false }));
+        }
       }
     });
     return;
@@ -142,9 +142,9 @@ const webServer = http.createServer((req, res) => {
         storage: 'json-file',
         users: store.stats().users,
         autoBackup: Boolean(backupChatId),
-        qrinConfigured: Boolean(process.env.QRIN_TOKEN)
+        pakasirConfigured: pakasir.isConfigured()
       })
-    : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS QRIN sedang berjalan.</p></body></html>';
+    : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS (Pakasir) sedang berjalan.</p></body></html>';
 
   res.writeHead(200, {
     'Content-Type': isHealthCheck ? 'application/json; charset=utf-8' : 'text/html; charset=utf-8'
@@ -309,6 +309,52 @@ async function buildMenuText(chatId) {
     `Pilih menu di bawah:`;
 }
 
+/**
+ * Teks sambutan /start — sengaja dibuat lengkap supaya user yang BARU pertama
+ * kali memakai bot langsung paham: apa yang bot lakukan, cara pakainya, biaya,
+ * syarat VPS, dan berapa lama prosesnya. Menu ringkas (buildMenuText) tetap
+ * dipakai untuk navigasi "kembali" agar tidak bertele-tele tiap kali.
+ */
+async function buildWelcomeText(chatId) {
+  const balance = await getBalance(chatId);
+  const balanceText = isAdmin(chatId)
+    ? 'Unlimited (admin)'
+    : `Rp ${Number(balance).toLocaleString('id-ID')}`;
+
+  return (
+    `🚀 *Selamat datang di Bot Instalasi RDP*\n\n` +
+    `Bot ini mengubah *VPS Ubuntu* milik Anda menjadi *RDP Windows* yang siap ` +
+    `dipakai — otomatis, tanpa perlu paham teknis. Anda cukup mengirim IP & ` +
+    `password VPS, memilih versi Windows, lalu bot yang mengerjakan sisanya.\n\n` +
+    `👤 ID Anda: \`${chatId}\`\n` +
+    `💰 Saldo: *${balanceText}*\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `📋 *Menu yang tersedia*\n\n` +
+    `🖥️ *Install RDP* — pasang Windows ke 1 VPS.\n` +
+    `📦 *Multi Install* — pasang ke banyak VPS sekaligus (maks 10 per batch).\n` +
+    `☁️ *Buat VPS* — buat VPS baru di akun DigitalOcean Anda sendiri (pakai ` +
+    `token DO Anda; sewa VPS ditagih DO ke akun Anda).\n` +
+    `💰 *Deposit* — isi saldo via QRIS (GoPay/OVO/DANA/ShopeePay/m-banking).\n` +
+    `💳 *Cek Saldo* · ❓ *FAQ* · 🏢 *Provider* rekomendasi VPS.\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `💵 *Biaya & cara bayar*\n` +
+    `• Instalasi *Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per VPS*.\n` +
+    `• Saldo *hanya dipotong kalau instalasi BERHASIL* — kalau gagal, saldo ` +
+    `utuh, tidak ada potongan.\n` +
+    `• Isi saldo lewat menu *Deposit* → scan QRIS → saldo masuk otomatis.\n\n` +
+    `⚡️ *Syarat minimal VPS*\n` +
+    `• ${MIN_CPU} Core CPU · ${MIN_RAM} GB RAM · ${MIN_STORAGE} GB storage kosong\n` +
+    `• OS *fresh install* Ubuntu 20.04 / 22.04 / 24.04\n\n` +
+    `⏳ *Berapa lama?*\n` +
+    `Instalasi berjalan di VPS Anda selama *±15–45 menit*. Progresnya ` +
+    `ditampilkan langsung di chat ini, dan Anda boleh menutup chat — prosesnya ` +
+    `tetap jalan dan hasilnya dikirim ke sini saat selesai.\n\n` +
+    `🆕 *Baru pertama kali?* Isi saldo dulu di *Deposit*, lalu tekan *Install RDP*.\n` +
+    `🆘 Bantuan admin: wa.me/6285173329868\n\n` +
+    `Pilih menu di bawah untuk mulai 👇`
+  );
+}
+
 /** Kirim menu utama sebagai pesan baru (dengan tombol inline). */
 async function sendMainMenu(chatId) {
   return safeSend(bot, chatId, await buildMenuText(chatId), {
@@ -347,7 +393,10 @@ bot.onText(/^\/start\b/, async (msg) => {
     await dataSiap;
     const chatId = msg.chat.id;
     await ensurePersistentKeyboard(chatId);
-    await sendMainMenu(chatId);
+    await safeSend(bot, chatId, await buildWelcomeText(chatId), {
+      parse_mode: 'Markdown',
+      ...createMainMenu(isAdmin(chatId))
+    });
   } catch (error) {
     console.error('Error in start command:', error);
     await safeSend(bot, msg.chat.id, '❌ Terjadi kesalahan. Silakan coba lagi.');
@@ -594,6 +643,15 @@ bot.on('callback_query', async (query) => {
     if (data.startsWith('multi_')) {
       await safeAnswer(bot, query.id);
       await handleMultiCallback(bot, query, userSessions);
+      return;
+    }
+
+    // Tombol "Cek Status Pembayaran" di pesan QRIS deposit.
+    // Formatnya paycheck:<order_id>. Jawaban ke user dikirim lewat alert
+    // callback (di dalam handleDepositCheck), jadi tidak perlu safeAnswer lagi.
+    if (data.startsWith('paycheck:')) {
+      const ref = data.slice('paycheck:'.length);
+      await handleDepositCheck(bot, chatId, ref, query);
       return;
     }
 
