@@ -50,8 +50,17 @@ async function verifyAndCreditDeposit(bot, ref) {
 
   if (!completed) return { state: "unpaid", amount: pending.amount };
 
+  // Simpan dulu message_id pesan QR sebelum catatan pending dihapus, supaya
+  // pesan QR-nya bisa dihapus otomatis (biar chat rapi setelah lunas).
+  const qrMsgId = pending.msg_id;
+
   const hasil = store.creditDeposit(pending.user_id, pending.amount, ref, "deposit");
   store.removePendingDeposit(ref);
+
+  // Hapus pesan QRIS lama begitu pembayaran diterima.
+  if (qrMsgId) {
+    bot.deleteMessage(pending.user_id, qrMsgId).catch(() => {});
+  }
 
   if (hasil.duplikat) return { state: "already", amount: pending.amount };
 
@@ -62,7 +71,15 @@ async function verifyAndCreditDeposit(bot, ref) {
         `💰 Saldo bertambah *Rp ${Number(pending.amount).toLocaleString("id-ID")}*\n` +
         `💳 Saldo sekarang *Rp ${Number(hasil.balance).toLocaleString("id-ID")}*\n\n` +
         `Silakan lanjut Install RDP dari menu utama.`,
-      { parse_mode: "Markdown" }
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🖥️ Install RDP", callback_data: "install_rdp" }],
+            [{ text: "🏠 Menu Utama", callback_data: "back_to_menu" }],
+          ],
+        },
+      }
     ).catch(() => {});
     return { state: "credited", amount: pending.amount };
   }
@@ -174,12 +191,12 @@ async function handleDepositAmount(bot, msg, session) {
 
     // Tombol "Cek Status" memakai order_id sebagai kunci — nominalnya sudah
     // tersimpan di daftar tunggu, jadi tidak perlu ikut dititipkan di tombol.
-    await bot.sendPhoto(chatId, qrBuffer, {
+    const qrMsg = await bot.sendPhoto(chatId, qrBuffer, {
       caption:
         messageText +
-        "\n\n_Saldo bertambah otomatis setelah pembayaran diterima. " +
-        "Bila sudah bayar tapi saldo belum masuk dalam 1-2 menit, tekan " +
-        "tombol *Cek Status Pembayaran* di bawah._",
+        "\n\n_Saldo bertambah otomatis setelah pembayaran diterima. Pesan QR ini " +
+        "akan hilang sendiri begitu pembayaran masuk. Bila sudah bayar tapi saldo " +
+        "belum masuk dalam 1-2 menit, tekan tombol *Cek Status Pembayaran* di bawah._",
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
@@ -188,6 +205,11 @@ async function handleDepositAmount(bot, msg, session) {
         ],
       },
     });
+
+    // Simpan message_id pesan QR supaya bisa dihapus otomatis saat lunas.
+    if (qrMsg && qrMsg.message_id) {
+      store.attachPendingMessage(reffId, qrMsg.message_id);
+    }
 
     // Pemantau otomatis sebagai cadangan kalau webhook telat/tidak sampai.
     startPaymentMonitor(bot, reffId, amount);

@@ -400,15 +400,20 @@ class Store {
       .forEach((k) => delete this.data.deposits[k]);
   }
 
-  /* ═══════════════ Deposit QRIN yang menunggu (webhook) ═══════════════ */
+  /* ═══════════════ Deposit yang menunggu (webhook Pakasir) ═══════════════ */
 
-  /** Catat deposit QRIN yang menunggu dibayar. Disimpan permanen + dicadangkan. */
-  addPendingDeposit(ref, userId, amount) {
+  /**
+   * Catat deposit yang menunggu dibayar. Disimpan permanen + dicadangkan.
+   * @param {number|null} msgId  message_id pesan QRIS di Telegram — dipakai
+   *   untuk MENGHAPUS pesan QR otomatis begitu pembayaran lunas.
+   */
+  addPendingDeposit(ref, userId, amount, msgId = null) {
     if (!ref) return false;
     if (!this.data.pendingDeposits) this.data.pendingDeposits = {};
     this.data.pendingDeposits[String(ref)] = {
       user_id: Number(userId),
       amount: Number(amount),
+      msg_id: msgId != null ? Number(msgId) : null,
       at: new Date().toISOString()
     };
     // Batasi agar tidak menumpuk selamanya (buang yang paling lama).
@@ -419,6 +424,15 @@ class Store {
         .slice(0, kunci.length - Math.floor(MAX_DEPOSITS * 0.8))
         .forEach((k) => delete this.data.pendingDeposits[k]);
     }
+    return this.saveNow();
+  }
+
+  /** Tempelkan message_id pesan QR ke deposit yang sudah tercatat. */
+  attachPendingMessage(ref, msgId) {
+    if (!ref || !this.data.pendingDeposits) return false;
+    const p = this.data.pendingDeposits[String(ref)];
+    if (!p) return false;
+    p.msg_id = msgId != null ? Number(msgId) : null;
     return this.saveNow();
   }
 
