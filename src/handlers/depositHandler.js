@@ -12,63 +12,101 @@ function generateUniqueCode() {
 }
 
 /**
- * Verifikasi & kreditkan sebuah deposit Pakasir.
+ * Cache status per txn_id supaya tidak melanggar batas Pakasir v2
+ * (1 permintaan status / 4 detik / transaksi). Webhook, pemantau otomatis, dan
+ * tombol "Cek Status" bisa datang berdekatan; ini mencegah error 429.
+ */
+const statusCache = new Map(); // txn_id -> { at, result }
+
+async function getStatus(pending) {
+  // Deposit lama (sebelum migrasi v2) tidak punya txn_id → pakai endpoint v1.
+  if (!pending.txn_id) {
+    return pakasir.checkStatusLegacy(pending.ref, pending.amount);
+  }
+  const key = pending.txn_id;
+  const cached = statusCache.get(key);
+  if (cached && Date.now() - cached.at < pakasir.STATUS_GAP_MS) {
+    return cached.result; // masih segar, jangan panggil Pakasir lagi
+  }
+  const result = await pakasir.checkStatusByTxn(key);
+  statusCache.set(key, { at: Date.now(), result });
+  // Jaga cache tetap kecil.
+  if (statusCache.size > 500) {
+    for (const k of statusCache.keys()) { statusCache.delete(k); if (statusCache.size <= 400) break; }
+  }
+  return result;
+}
+
+/** Nominal yang sah untuk dicocokkan dengan "amount" dari Pakasir. */
+function amountMatches(pending, trxAmount) {
+  if (trxAmount == null) return true; // Pakasir tidak menyertakan amount → percaya status
+  const a = Number(trxAmount);
+  return a === Number(pending.gateway_amount) ||
+         a === Number(pending.amount) ||
+         a === Number(pending.total_payment);
+}
+
+/**
+ * Verifikasi & kreditkan sebuah deposit Pakasir (v2).
  *
- * Dipakai dari TIGA tempat sekaligus, semuanya lewat fungsi ini supaya logika
- * (dan pesan sukses) tidak terduplikasi:
- *   1. Webhook/callback Pakasir (di index.js)
- *   2. Tombol "Cek Status Pembayaran" yang ditekan user
- *   3. Pemantau otomatis di latar belakang
- *
- * Selalu memverifikasi ulang ke STATUS API Pakasir sebelum menambah saldo —
- * isi webhook TIDAK pernah dipercaya mentah-mentah. creditDeposit bersifat
- * idempoten (dikunci per order_id), jadi tiga jalur ini tidak akan pernah
- * menambah saldo dua kali untuk satu pembayaran.
+ * Dipakai dari TIGA tempat: webhook Pakasir, tombol "Cek Status", dan pemantau
+ * otomatis. Selalu memverifikasi ke STATUS API Pakasir sebelum menambah saldo —
+ * isi webhook tidak pernah dipercaya mentah. creditDeposit idempoten (dikunci
+ * per order_id), jadi ketiga jalur ini tidak akan menambah saldo dua kali.
  *
  * @returns {Promise<{state:string, amount?:number}>}
- *   state: 'credited' | 'already' | 'unpaid' | 'unknown' | 'error'
+ *   state: 'credited' | 'already' | 'unpaid' | 'expired' | 'unknown' | 'error'
  */
 async function verifyAndCreditDeposit(bot, ref) {
   if (!ref) return { state: "unknown" };
 
   const pending = store.getPendingDeposit(ref);
   if (!pending) {
-    // Ref tidak ada di daftar tunggu: sudah pernah dikreditkan lalu dibersihkan,
-    // atau milik bot/merchant lain di project Pakasir yang sama. Aman diabaikan.
+    // Sudah pernah dikreditkan lalu dibersihkan, atau milik bot lain di project
+    // Pakasir yang sama. Aman diabaikan.
     return { state: "unknown" };
   }
+  pending.ref = ref;
 
   // Sumber kebenaran: tanyakan langsung ke Pakasir.
-  let completed = false;
+  let trx = null;
   try {
-    const trx = await pakasir.checkStatus(ref, pending.amount);
-    completed = trx && pakasir.isCompletedStatus(trx.status);
+    trx = await getStatus(pending);
   } catch (error) {
     console.error(`[PAKASIR VERIFY] ref=${ref} gagal cek status: ${error.message}`);
-    return { state: "error" };
+    return { state: "error", amount: pending.amount };
   }
 
-  if (!completed) return { state: "unpaid", amount: pending.amount };
+  const status = trx && trx.status;
+  if (status === "canceled") {
+    // Gugur di Pakasir (dibatalkan di dasbor / lewat 24 jam). Berhenti menunggu.
+    store.removePendingDeposit(ref);
+    return { state: "expired", amount: pending.amount };
+  }
+  if (status !== "completed") return { state: "unpaid", amount: pending.amount };
 
-  // Simpan dulu message_id pesan QR sebelum catatan pending dihapus, supaya
-  // pesan QR-nya bisa dihapus otomatis (biar chat rapi setelah lunas).
+  if (!amountMatches(pending, trx.amount)) {
+    console.error(`[PAKASIR VERIFY] ref=${ref} nominal Pakasir (${trx.amount}) tidak cocok.`);
+    return { state: "error", amount: pending.amount };
+  }
+
+  // Saldo yang dikreditkan = yang benar-benar dibayar buyer (mode biaya penjual)
+  // atau nominal deposit (mode biaya pembeli). Tersimpan di pending.credit.
+  const kredit = pending.credit != null ? Number(pending.credit) : Number(pending.amount);
   const qrMsgId = pending.msg_id;
 
-  const hasil = store.creditDeposit(pending.user_id, pending.amount, ref, "deposit");
+  const hasil = store.creditDeposit(pending.user_id, kredit, ref, "deposit");
   store.removePendingDeposit(ref);
 
-  // Hapus pesan QRIS lama begitu pembayaran diterima.
-  if (qrMsgId) {
-    bot.deleteMessage(pending.user_id, qrMsgId).catch(() => {});
-  }
+  if (qrMsgId) bot.deleteMessage(pending.user_id, qrMsgId).catch(() => {});
 
-  if (hasil.duplikat) return { state: "already", amount: pending.amount };
+  if (hasil.duplikat) return { state: "already", amount: kredit };
 
   if (hasil.ok) {
     bot.sendMessage(
       pending.user_id,
       `✅ *Pembayaran Berhasil!*\n\n` +
-        `💰 Saldo bertambah *Rp ${Number(pending.amount).toLocaleString("id-ID")}*\n` +
+        `💰 Saldo bertambah *Rp ${Number(kredit).toLocaleString("id-ID")}*\n` +
         `💳 Saldo sekarang *Rp ${Number(hasil.balance).toLocaleString("id-ID")}*\n\n` +
         `Silakan lanjut Install RDP dari menu utama.`,
       {
@@ -81,43 +119,32 @@ async function verifyAndCreditDeposit(bot, ref) {
         },
       }
     ).catch(() => {});
-    return { state: "credited", amount: pending.amount };
+    return { state: "credited", amount: kredit };
   }
 
-  return { state: "error", amount: pending.amount };
+  return { state: "error", amount: kredit };
 }
 
 /**
- * Pemantau pembayaran otomatis (jaring pengaman kalau webhook telat/tidak
- * sampai). Menanyakan status ke Pakasir tiap 20 detik, maksimal 20 menit, lalu
- * berhenti sendiri. Berhenti lebih awal begitu deposit sudah lunas / dibersihkan.
+ * Pemantau pembayaran otomatis (jaring pengaman). Menanyakan status ke Pakasir
+ * tiap 20 detik (aman dari batas 4 detik), maksimal 20 menit, lalu berhenti.
  */
-function startPaymentMonitor(bot, ref, amount) {
+function startPaymentMonitor(bot, ref) {
   const POLL_MS = 20000;
   const MAX_MS = 20 * 60 * 1000;
   const startedAt = Date.now();
 
   const timer = setInterval(async () => {
-    // Sudah tidak menunggu lagi (lunas / kadaluarsa / dibersihkan) → stop.
-    if (!store.getPendingDeposit(ref)) {
-      clearInterval(timer);
-      return;
-    }
-    if (Date.now() - startedAt > MAX_MS) {
-      clearInterval(timer);
-      return;
-    }
+    if (!store.getPendingDeposit(ref)) { clearInterval(timer); return; }
+    if (Date.now() - startedAt > MAX_MS) { clearInterval(timer); return; }
     try {
       const { state } = await verifyAndCreditDeposit(bot, ref);
-      if (state === "credited" || state === "already" || state === "unknown") {
+      if (state === "credited" || state === "already" || state === "expired" || state === "unknown") {
         clearInterval(timer);
       }
-    } catch (_) {
-      // Error sementara diabaikan; siklus berikutnya mencoba lagi.
-    }
+    } catch (_) { /* siklus berikutnya mencoba lagi */ }
   }, POLL_MS);
 
-  // Jangan menahan proses Node tetap hidup hanya karena timer ini.
   if (timer.unref) timer.unref();
 }
 
@@ -154,14 +181,9 @@ async function handleDepositAmount(bot, msg, session) {
   if (!amount || amount < 2000) {
     await bot.editMessageText(
       `❌ Jumlah tidak valid. Ketik nominal deposit berupa angka (minimal Rp 2.000).`,
-      {
-        chat_id: chatId,
-        message_id: session.messageId,
-        parse_mode: "Markdown",
-      }
+      { chat_id: chatId, message_id: session.messageId, parse_mode: "Markdown" }
     ).catch(() => {});
-    // false = sesi JANGAN dihapus, user masih diminta mengirim nominal lagi.
-    return false;
+    return false; // sesi JANGAN dihapus, user diminta kirim nominal lagi
   }
 
   await bot.editMessageText("🔄 Membuat QRIS pembayaran...", {
@@ -173,27 +195,38 @@ async function handleDepositAmount(bot, msg, session) {
     const reffId = generateUniqueCode();
 
     const paymentData = await pakasir.createPayment(reffId, amount);
-    if (!paymentData?.qr_string) {
-      throw new Error("QRIS gagal dibuat");
-    }
+    if (!paymentData?.qr_string) throw new Error("QRIS gagal dibuat");
 
-    // Catat deposit menunggu SECARA PERMANEN sebelum QR ditampilkan. Dengan
-    // begitu, saat callback Pakasir masuk (bahkan setelah bot restart), bot tahu
-    // saldo siapa yang harus ditambah — dan berapa nominalnya untuk verifikasi.
-    store.addPendingDeposit(reffId, chatId, amount);
+    // Catat deposit menunggu SECARA PERMANEN sebelum QR ditampilkan, lengkap
+    // dengan txn_id (wajib untuk cek status v2) dan nominal yang akan dikredit.
+    store.addPendingDeposit(reffId, chatId, amount, {
+      txn_id: paymentData.txnId,
+      credit: paymentData.amount,
+      gateway_amount: paymentData.gatewayAmount,
+      total_payment: paymentData.totalBayar,
+      fee_payer: paymentData.feePayer,
+      expired_at: paymentData.expired_at,
+    });
 
     const { messageText } = createPaymentMessage(paymentData, amount);
+    const catatanBiaya =
+      paymentData.feePayer === "merchant"
+        ? "\n\n_Biaya QRIS ditanggung penjual — kamu membayar persis sesuai nominal._"
+        : "";
+    const catatanSandbox = paymentData.isSandbox
+      ? "\n\n⚠️ _Mode sandbox — bukan pembayaran sungguhan._"
+      : "";
 
     const qrBuffer = await QRCode.toBuffer(paymentData.qr_string, {
       type: "png",
       width: 500,
     });
 
-    // Tombol "Cek Status" memakai order_id sebagai kunci — nominalnya sudah
-    // tersimpan di daftar tunggu, jadi tidak perlu ikut dititipkan di tombol.
     const qrMsg = await bot.sendPhoto(chatId, qrBuffer, {
       caption:
         messageText +
+        catatanBiaya +
+        catatanSandbox +
         "\n\n_Saldo bertambah otomatis setelah pembayaran diterima. Pesan QR ini " +
         "akan hilang sendiri begitu pembayaran masuk. Bila sudah bayar tapi saldo " +
         "belum masuk dalam 1-2 menit, tekan tombol *Cek Status Pembayaran* di bawah._",
@@ -206,25 +239,23 @@ async function handleDepositAmount(bot, msg, session) {
       },
     });
 
-    // Simpan message_id pesan QR supaya bisa dihapus otomatis saat lunas.
     if (qrMsg && qrMsg.message_id) {
       store.attachPendingMessage(reffId, qrMsg.message_id);
     }
 
-    // Pemantau otomatis sebagai cadangan kalau webhook telat/tidak sampai.
-    startPaymentMonitor(bot, reffId, amount);
+    startPaymentMonitor(bot, reffId);
 
     return true;
   } catch (error) {
     console.error("Payment Error:", error.message);
+    // Pesan validasi nominal (mis. terlalu kecil untuk QRIS) ditampilkan apa adanya.
+    const ramah = /QRIS|Nominal|minimal|maksimal/i.test(error.message)
+      ? error.message
+      : "Kemungkinan konfigurasi Pakasir (PAKASIR_PROJECT / PAKASIR_API_KEY) belum benar, " +
+        "atau layanan sedang sibuk. Coba lagi beberapa saat.";
     await bot.editMessageText(
-      "❌ Gagal membuat pembayaran QRIS.\n\n" +
-        "Kemungkinan konfigurasi Pakasir (PAKASIR_PROJECT / PAKASIR_API_KEY) belum benar, " +
-        "atau layanan sedang sibuk. Coba lagi beberapa saat.",
-      {
-        chat_id: chatId,
-        message_id: session.messageId,
-      }
+      "❌ Gagal membuat pembayaran QRIS.\n\n" + ramah,
+      { chat_id: chatId, message_id: session.messageId }
     ).catch(() => {});
     return true;
   }
@@ -242,7 +273,6 @@ async function handleDepositCheck(bot, chatId, ref, query) {
 
   switch (state) {
     case "credited":
-      // Pesan sukses lengkap sudah dikirim verifyAndCreditDeposit.
       answer("✅ Pembayaran diterima! Saldo sudah ditambahkan.", true);
       break;
     case "already":
@@ -251,9 +281,12 @@ async function handleDepositCheck(bot, chatId, ref, query) {
     case "unpaid":
       answer(
         "⌛ Pembayaran belum kami terima. Selesaikan pembayaran QRIS dulu, " +
-          "lalu tekan tombol ini lagi.",
+          "lalu tekan tombol ini lagi (beri jeda beberapa detik).",
         true
       );
+      break;
+    case "expired":
+      answer("⏰ Tagihan ini sudah kadaluarsa. Silakan buat deposit baru.", true);
       break;
     case "error":
       answer("⚠️ Gagal menghubungi server pembayaran. Coba lagi sebentar.", true);

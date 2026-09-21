@@ -407,13 +407,23 @@ class Store {
    * @param {number|null} msgId  message_id pesan QRIS di Telegram — dipakai
    *   untuk MENGHAPUS pesan QR otomatis begitu pembayaran lunas.
    */
-  addPendingDeposit(ref, userId, amount, msgId = null) {
+  addPendingDeposit(ref, userId, amount, extra = null) {
     if (!ref) return false;
     if (!this.data.pendingDeposits) this.data.pendingDeposits = {};
+    // Kompatibel mundur: dulu parameter ke-4 adalah msgId (angka). Sekarang bisa
+    // objek berisi field tambahan Pakasir v2 (txn_id, credit, dst).
+    const opt = (extra && typeof extra === 'object') ? extra
+      : { msg_id: extra != null ? Number(extra) : null };
     this.data.pendingDeposits[String(ref)] = {
       user_id: Number(userId),
       amount: Number(amount),
-      msg_id: msgId != null ? Number(msgId) : null,
+      msg_id: opt.msg_id != null ? Number(opt.msg_id) : null,
+      txn_id: opt.txn_id != null ? String(opt.txn_id) : null,
+      credit: opt.credit != null ? Number(opt.credit) : Number(amount),
+      gateway_amount: opt.gateway_amount != null ? Number(opt.gateway_amount) : null,
+      total_payment: opt.total_payment != null ? Number(opt.total_payment) : null,
+      fee_payer: opt.fee_payer || null,
+      expired_at: opt.expired_at || null,
       at: new Date().toISOString()
     };
     // Batasi agar tidak menumpuk selamanya (buang yang paling lama).
