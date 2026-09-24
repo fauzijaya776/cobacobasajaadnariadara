@@ -1,46 +1,69 @@
 const store = require('../utils/store');
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function isParseError(error) {
+  const desc = error?.response?.body?.description || error?.message || '';
+  return /can't parse entities|can't find end/i.test(desc);
+}
+
+/**
+ * Kirim pesan admin ke semua user.
+ *
+ * Perbaikan:
+ *  - Pesan dengan karakter Markdown tak berpasangan (mis. "_" di username)
+ *    dulu GAGAL ke semua user. Sekarang otomatis dikirim ulang tanpa format.
+ *  - Jeda 60 ms antar pesan agar tidak melewati batas Telegram (~30 pesan/detik).
+ *  - Tidak lagi memanggil getChat per user (setengah jumlah panggilan API).
+ */
 async function broadcastMessage(bot, message, adminChatId) {
-  try {
-    // Ambil semua telegram_id dari database
-    const userIds = store.listUserIds();
+  const userIds = store.listUserIds().filter((id) => Number(id) > 0);
+  let successCount = 0;
+  let failedCount = 0;
+  let blockedCount = 0;
+  // Sekali Telegram menolak format Markdown-nya, sisa pesan langsung dikirim
+  // tanpa format (hemat 1 panggilan API per user).
+  let plain = false;
 
-    let successCount = 0; // Jumlah pesan yang berhasil dikirim
-    let failedCount = 0;  // Jumlah pesan yang gagal dikirim
+  console.log(`Mengirim broadcast ke ${userIds.length} pengguna...`);
 
-    console.log(`Mengirim pesan ke ${userIds.length} pengguna...`);
-
-    // Kirim pesan ke setiap pengguna
-    for (const userId of userIds) {
-      try {
-        // Cek apakah bot bisa mengakses chat dengan pengguna
-        await bot.getChat(userId);
-
-        // Kirim pesan
-        await bot.sendMessage(userId, message, { parse_mode: "Markdown" });
-        successCount++;
-        console.log(`Pesan berhasil dikirim ke ${userId}`);
-      } catch (error) {
-        if (error.response?.body?.error_code === 403) {
-          console.log(`Pengguna ${userId} memblokir bot atau tidak dapat dijangkau.`);
-        } else {
-          console.error(`Gagal mengirim pesan ke ${userId}:`, error.message);
+  for (const userId of userIds) {
+    try {
+      if (plain) {
+        await bot.sendMessage(userId, message);
+      } else {
+        try {
+          await bot.sendMessage(userId, message, { parse_mode: 'Markdown' });
+        } catch (error) {
+          if (!isParseError(error)) throw error;
+          plain = true;
+          await bot.sendMessage(userId, message);
         }
-        failedCount++;
       }
+      successCount++;
+    } catch (error) {
+      const code = error?.response?.body?.error_code;
+      if (code === 403) blockedCount++;
+      else console.error(`Gagal broadcast ke ${userId}:`, error.message);
+      failedCount++;
+      // Kena rate limit → tunggu sesuai saran Telegram lalu lanjut.
+      const retry = error?.response?.body?.parameters?.retry_after;
+      if (retry) await sleep((Number(retry) + 1) * 1000);
     }
+    await sleep(60);
+  }
 
-    console.log('Broadcast selesai!');
+  const report =
+    `📊 *Laporan Broadcast*\n\n` +
+    `👥 Target: ${userIds.length}\n` +
+    `✅ Berhasil: ${successCount}\n` +
+    `❌ Gagal: ${failedCount}` +
+    (blockedCount ? ` (${blockedCount} memblokir bot)` : '');
 
-    // Kirim laporan ke admin
-    const report = `📊 *Laporan Broadcast*\n\n` +
-                  `✅ Berhasil dikirim: ${successCount}\n` +
-                  `❌ Gagal dikirim: ${failedCount}`;
-
-    await bot.sendMessage(adminChatId, report, { parse_mode: "Markdown" });
+  try {
+    await bot.sendMessage(adminChatId, report, { parse_mode: 'Markdown' });
   } catch (error) {
-    console.error('Error during broadcast:', error);
-    throw error;
+    console.error('Gagal mengirim laporan broadcast:', error.message);
   }
 }
 

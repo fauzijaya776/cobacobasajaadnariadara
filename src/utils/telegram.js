@@ -17,6 +17,21 @@ function escapeMd(text) {
   return String(text == null ? '' : text).replace(/([_*`\[\]])/g, '\\$1');
 }
 
+// Di Markdown lama Telegram, backslash TIDAK diproses di dalam entitas
+// (`code`, *bold*, _italic_) — "\_" akan tampil apa adanya. Jadi isi entitas
+// cukup dibersihkan dari karakter penutup entitas itu sendiri.
+// Penting untuk password: escapeMd di dalam backtick dulu membuat password
+// yang mengandung _ atau * tampil dengan backslash (salah salin).
+function mdCode(text) {
+  return String(text == null ? '' : text).replace(/`/g, "'");
+}
+function mdBold(text) {
+  return String(text == null ? '' : text).replace(/\*/g, '');
+}
+function mdItalic(text) {
+  return String(text == null ? '' : text).replace(/_/g, ' ');
+}
+
 function isNotModified(error) {
   const desc = error?.response?.body?.description || error?.message || '';
   return /message is not modified/i.test(desc);
@@ -27,9 +42,17 @@ function isParseError(error) {
   return /can't parse entities|can't find end|unsupported start tag/i.test(desc);
 }
 
+/**
+ * Pesan tidak bisa di-edit menjadi teks → kirim pesan baru saja.
+ *
+ * Termasuk "there is no text in the message to edit": terjadi kalau tombol
+ * ditekan dari pesan FOTO (mis. tombol "Menu Utama" di bawah gambar QRIS).
+ * Dulu kasus ini hanya tercatat di log dan user melihat tombolnya tidak
+ * bereaksi sama sekali.
+ */
 function isGone(error) {
   const desc = error?.response?.body?.description || error?.message || '';
-  return /message to edit not found|message can't be edited|MESSAGE_ID_INVALID/i.test(desc);
+  return /message to edit not found|message can't be edited|MESSAGE_ID_INVALID|no text in the message to edit/i.test(desc);
 }
 
 /**
@@ -116,6 +139,9 @@ async function safeDelete(bot, chatId, messageId) {
 
 module.exports = {
   escapeMd,
+  mdCode,
+  mdBold,
+  mdItalic,
   safeEdit,
   safeSend,
   safeAnswer,

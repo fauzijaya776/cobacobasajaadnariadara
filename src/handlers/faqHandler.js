@@ -1,38 +1,49 @@
+const { safeEdit } = require('../utils/telegram');
+const { INSTALLATION_COST, VPS_CREATE_COST } = require('../config/constants');
+
 async function handleFAQ(bot, chatId, messageId) {
+  const rp = (n) => `Rp ${Number(n).toLocaleString('id-ID')}`;
   const faqText =
-`❓ *FAQ Singkat*
+`❓ *FAQ & Bantuan*
 
 🖥️ *Install RDP*
-Ubah VPS Ubuntu jadi Windows RDP. Kirim IP + password VPS, pilih Windows, tunggu. Rp 1.000/VPS, saldo terpotong hanya kalau berhasil.
+Ubah VPS Ubuntu jadi RDP Windows. Kirim IP + password VPS, pilih versi Windows, buat password RDP, tunggu ±15–45 menit. ${rp(INSTALLATION_COST)}/VPS, saldo dipotong *hanya kalau berhasil*.
 
-📦 *Multi Install*
-Pasang RDP ke banyak VPS sekaligus (1 baris = 1 VPS: \`ip password\`).
+📦 *Multi Install RDP*
+Pasang RDP ke banyak VPS sekaligus (maks 10). Satu baris = satu VPS: \`IP PASSWORD\`. Ditagih per VPS yang berhasil.
 
-☁️ *Buat VPS (DigitalOcean)*
-Bikin VPS baru pakai token DO kamu sendiri (scope *Write*). Rp 1.000 flat 1–10 VPS; sewa VPS ditagih DO ke akunmu.
+☁️ *Control DO via API*
+Pakai token DigitalOcean Anda sendiri (scope *Write*): buat droplet 1–10 sekaligus (${rp(VPS_CREATE_COST)} flat/batch), lihat daftar, nyalakan/matikan/reboot, reset password root, snapshot, hapus droplet, cek tagihan — selain buat droplet semuanya gratis. Token hanya disimpan sementara di memori bot.
 
-💰 *Deposit*
-Isi saldo via QRIS. Saldo masuk otomatis setelah dibayar.
+💰 *Deposit Saldo*
+Isi saldo via QRIS (semua e-wallet & m-banking). Bayar persis sesuai nominal, saldo masuk otomatis. Kalau belum masuk 1–2 menit, tekan *Cek Status Pembayaran*.
 
 🔑 *Aturan Password*
-• RDP Windows: huruf + angka, min 8. Contoh \`Fauzi2024\`
-• Root VPS (DO): wajib simbol + huruf besar/kecil + angka, karakter terakhir huruf. Contoh \`@Mbahfauzi2025x\`
+• RDP Windows: huruf + angka, min 8, tanpa simbol. Contoh \`Fauzi2024\`
+• Root droplet DO: wajib simbol + huruf besar/kecil + angka, karakter terakhir huruf. Contoh \`@Mbahfauzi2025x\`
+
+🔌 *Cara connect RDP*
+Buka Remote Desktop (Windows) / Microsoft Remote Desktop (HP) → IP VPS, user \`admin\`, password RDP yang Anda buat.
 
 💡 *Tips*
-• Kalau muncul "NoVNC Encountered An Error" saat monitoring, abaikan — tunggu 10–60 menit sampai selesai.
-• Bisa jalankan beberapa instalasi sekaligus.
-• Setelah RDP jadi, set *Account lockout threshold* = 0 (secpol.msc → Account Policies → Account Lockout Policy) biar akun tak terkunci.
+• Link monitor \`http://IP:8006\` menampilkan layar Windows saat dipasang. Tulisan "NoVNC encountered an error" itu normal saat Windows restart — tunggu saja.
+• Tunggu Windows Setup benar-benar selesai (10–60 menit) sebelum connect RDP.
+• Satu akun hanya bisa menjalankan satu proses instalasi dalam satu waktu; pakai *Multi Install* untuk banyak VPS.
+• Setelah RDP jadi, set *Account lockout threshold* = 0 (secpol.msc → Account Policies → Account Lockout Policy) agar akun tidak terkunci.
+• Instalasi gagal? Saldo tidak terpotong. Pastikan VPS fresh Ubuntu, spek cukup, dan mendukung KVM.
 
-🆘 Admin: wa.me/6285173329868 · Ketik /start untuk buka menu.`;
+🆘 Admin: wa.me/6285173329868`;
 
-  await bot.editMessageText(faqText, {
+  await safeEdit(bot, faqText, {
     chat_id: chatId,
     message_id: messageId,
     parse_mode: 'Markdown',
+    disable_web_page_preview: true,
     reply_markup: {
-      inline_keyboard: [[
-        { text: '« Kembali', callback_data: 'back_to_menu' }
-      ]]
+      inline_keyboard: [
+        [{ text: '🏢 Rekomendasi VPS', callback_data: 'providers' }],
+        [{ text: '« Kembali', callback_data: 'back_to_menu' }]
+      ]
     }
   });
 }

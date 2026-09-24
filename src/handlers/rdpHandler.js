@@ -21,7 +21,7 @@ const {
   recordInstallation,
   updateInstallation
 } = require('../utils/userManager');
-const { safeEdit, safeSend, safeDelete, escapeMd } = require('../utils/telegram');
+const { safeEdit, safeSend, safeDelete, escapeMd, mdCode, mdBold } = require('../utils/telegram');
 const installLock = require('../utils/installLock');
 const { isValidRdpPassword, RDP_PASSWORD_RULE } = require('../utils/password');
 
@@ -328,7 +328,7 @@ async function handlePasswordInput(bot, chatId, text, session, userSessions) {
           }
         }
       );
-      userSessions.delete(chatId);
+      if (userSessions.get(chatId) === session) userSessions.delete(chatId);
       return;
     }
 
@@ -431,7 +431,7 @@ async function reportConnectionError(bot, chatId, session, userSessions, error) 
     }
   });
 
-  userSessions.delete(chatId);
+  if (userSessions.get(chatId) === session) userSessions.delete(chatId);
 }
 
 /* =========================================================================
@@ -526,6 +526,19 @@ async function handleWindowsSelection(bot, query, userSessions) {
   const messageId = query.message.message_id;
   const session = userSessions.get(chatId);
 
+  // Tombol lama ditekan saat instalasi sedang berjalan → jangan mulai ulang.
+  if (isInstalling(chatId) || (session && session.step === 'installing')) {
+    await safeEdit(bot,
+      '⏳ *Instalasi Anda sedang berjalan.*\nTunggu sampai selesai — hasilnya dikirim ke chat ini.',
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '« Kembali', callback_data: 'back_to_menu' }]] }
+      });
+    return;
+  }
+
   if (!session || !session.vpsConfig) {
     await safeEdit(bot, '❌ Sesi telah kadaluarsa. Silakan mulai dari awal.\n\n💰 _Saldo Anda tidak terpotong._', {
       chat_id: chatId,
@@ -541,7 +554,7 @@ async function handleWindowsSelection(bot, query, userSessions) {
 
   if (!isVersionCompatible(selected, session.vpsConfig)) {
     await safeEdit(bot,
-      `❌ *${escapeMd(selected.name)}* butuh minimal ${selected.minRam} GB RAM dan ${selected.minDisk} GB disk.\n\n` +
+      `❌ *${mdBold(selected.name)}* butuh minimal ${selected.minRam} GB RAM dan ${selected.minDisk} GB disk.\n\n` +
       `VPS Anda: ${session.vpsConfig.ram} GB RAM, ${session.vpsConfig.storage} GB disk.\n\n` +
       'Silakan pilih versi yang lebih ringan.',
       {
@@ -588,6 +601,10 @@ function buildRdpPasswordPrompt(session, errorNote = null) {
  * Langkah 4 — jalankan instalasi
  * ========================================================================= */
 async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) {
+  // Penjaga instalasi ganda: pesan password terkirim dua kali, atau instalasi
+  // lain (satuan/multi) sudah berjalan untuk user ini.
+  if (isInstalling(chatId) || session.step !== 'waiting_rdp_password') return;
+
   const password = String(text || '');
 
   if (!isValidRdpPassword(password)) {
@@ -725,7 +742,7 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
   if (!installSucceeded) {
     installLock.unlock(chatId);
     session.step = 'done';
-    userSessions.delete(chatId);
+    if (userSessions.get(chatId) === session) userSessions.delete(chatId);
     return;
   }
 
@@ -755,12 +772,12 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
     const viewerUp = services.find((s) => s.port === 8006)?.open;
 
     await safeEdit(bot,
-      `✅ *Instalasi Windows dimulai dengan sukses!*\n\n` +
+      `✅ *Instalasi RDP Windows berhasil!*\n\n` +
       `📝 *Detail RDP:*\n` +
       `🖥️ Windows: ${escapeMd(session.windowsVersion.name)}\n` +
       `🌐 IP: \`${session.ip}\`\n` +
       `👤 Username: \`admin\`\n` +
-      `🔑 Password: \`${escapeMd(session.rdpPassword)}\`\n\n` +
+      `🔑 Password: \`${mdCode(session.rdpPassword)}\`\n\n` +
       `⚙️ *Spesifikasi:*\n` +
       `• CPU: ${session.vpsConfig.cpu} Core\n` +
       `• RAM: ${session.vpsConfig.ram} GB\n` +
@@ -795,7 +812,7 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
   } finally {
     installLock.unlock(chatId);
     session.step = 'done';
-    userSessions.delete(chatId);
+    if (userSessions.get(chatId) === session) userSessions.delete(chatId);
   }
 }
 
@@ -863,6 +880,7 @@ async function notifyAdmin(bot, text) {
  * ========================================================================= */
 async function handlePageNavigation(bot, query, userSessions) {
   const chatId = query.message.chat.id;
+  if (isInstalling(chatId)) return;
   const page = parseInt(query.data.split('_')[1], 10) || 0;
   await showWindowsSelection(bot, chatId, query.message.message_id, page, userSessions);
 }

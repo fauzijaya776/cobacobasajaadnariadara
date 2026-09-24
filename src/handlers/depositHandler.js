@@ -149,24 +149,40 @@ function startPaymentMonitor(bot, ref) {
 }
 
 /* ================== STEP 1 ================== */
-async function handleDeposit(bot, chatId, messageId) {
-  const msg = await bot.editMessageText(
-    "💰 *Deposit Saldo*\n\n" +
-      "Ketik jumlah deposit yang diinginkan (minimal *Rp 2.000*).\n\n" +
-      "Contoh: ketik `10000` untuk deposit Rp 10.000.\n\n" +
-      "Setelah itu bot membuat QRIS yang bisa dibayar lewat GoPay, OVO, DANA, " +
-      "ShopeePay, atau m-banking apa pun. Saldo masuk otomatis setelah pembayaran diterima.",
-    {
-      chat_id: chatId,
-      message_id: messageId,
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [[{ text: "« Kembali", callback_data: "back_to_menu" }]],
-      },
-    }
-  );
+const MIN_DEPOSIT = 2000;
+const MAX_DEPOSIT = 10000000; // batas QRIS Pakasir
 
-  return { step: "waiting_amount", messageId: msg.message_id };
+async function handleDeposit(bot, chatId, messageId) {
+  const text =
+    "💰 *Deposit Saldo*\n\n" +
+    `Ketik jumlah deposit yang diinginkan (minimal *Rp ${MIN_DEPOSIT.toLocaleString("id-ID")}*).\n\n` +
+    "Contoh: ketik `10000` untuk deposit Rp 10.000.\n\n" +
+    "Bot akan membuat QRIS yang bisa dibayar lewat GoPay, OVO, DANA, ShopeePay, " +
+    "atau m-banking apa pun. Bayar *persis sesuai nominal* (tanpa biaya tambahan), " +
+    "saldo masuk otomatis.";
+  const options = {
+    chat_id: chatId,
+    message_id: messageId,
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [[{ text: "« Kembali", callback_data: "back_to_menu" }]],
+    },
+  };
+
+  // Edit pesan yang ada; kalau tidak bisa (pesan foto, terlalu lama, sudah
+  // dihapus), kirim pesan baru — dulu error di sini membuat tombol Deposit
+  // hanya memunculkan "Terjadi kesalahan".
+  try {
+    const msg = await bot.editMessageText(text, options);
+    if (msg && msg.message_id) return { step: "waiting_amount", messageId: msg.message_id };
+    return { step: "waiting_amount", messageId };
+  } catch (error) {
+    const desc = error?.response?.body?.description || error?.message || "";
+    if (/message is not modified/i.test(desc)) return { step: "waiting_amount", messageId };
+    const { chat_id, message_id, ...rest } = options;
+    const sent = await bot.sendMessage(chatId, text, rest);
+    return { step: "waiting_amount", messageId: sent.message_id };
+  }
 }
 
 /* ================== STEP 2 ================== */
@@ -178,10 +194,16 @@ async function handleDepositAmount(bot, msg, session) {
     await bot.deleteMessage(chatId, msg.message_id);
   } catch {}
 
-  if (!amount || amount < 2000) {
+  if (!amount || amount < MIN_DEPOSIT || amount > MAX_DEPOSIT) {
     await bot.editMessageText(
-      `❌ Jumlah tidak valid. Ketik nominal deposit berupa angka (minimal Rp 2.000).`,
-      { chat_id: chatId, message_id: session.messageId, parse_mode: "Markdown" }
+      `❌ Jumlah tidak valid. Ketik nominal deposit berupa angka ` +
+        `(Rp ${MIN_DEPOSIT.toLocaleString("id-ID")} – Rp ${MAX_DEPOSIT.toLocaleString("id-ID")}).`,
+      {
+        chat_id: chatId,
+        message_id: session.messageId,
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[{ text: "« Kembali", callback_data: "back_to_menu" }]] },
+      }
     ).catch(() => {});
     return false; // sesi JANGAN dihapus, user diminta kirim nominal lagi
   }

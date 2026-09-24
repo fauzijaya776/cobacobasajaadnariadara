@@ -90,7 +90,7 @@ class DatabaseBackup {
     await this.bot.editMessageText(
       `📊 *Manajemen Data*\n\n` +
       `🗄️ Penyimpanan: file JSON\n` +
-      `📁 ${s.file}\n\n` +
+      `📁 \`${String(s.file).replace(/`/g, "'")}\`\n\n` +
       `👥 User: ${s.users}\n` +
       `💰 Total saldo: Rp ${s.totalSaldo.toLocaleString('id-ID')}\n` +
       `🧾 Transaksi: ${s.transactions}\n` +

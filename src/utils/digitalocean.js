@@ -95,9 +95,105 @@ async function validateToken(token) {
   try {
     const res = await client(token).get('/account');
     const acc = (res.data && res.data.account) || {};
-    return { ok: true, email: acc.email, status: acc.status };
+    return {
+      ok: true,
+      email: acc.email,
+      status: acc.status,
+      dropletLimit: acc.droplet_limit != null ? Number(acc.droplet_limit) : null,
+      scoped: false
+    };
   } catch (error) {
+    // Token "custom scope" boleh tidak punya izin baca akun (403) tapi tetap
+    // bisa mengelola droplet. Coba sekali lagi lewat /droplets sebelum menolak.
+    const status = error && error.response && error.response.status;
+    if (status === 403) {
+      try {
+        await client(token).get('/droplets', { params: { per_page: 1 } });
+        return { ok: true, email: null, status: null, dropletLimit: null, scoped: true };
+      } catch (_) { /* tetap ditolak */ }
+    }
     return { ok: false, error: describeError(error) };
+  }
+}
+
+/* ============================================================
+ * Control DigitalOcean — daftar, detail, aksi, hapus, tagihan
+ * ============================================================ */
+
+/** Ringkas objek droplet mentah jadi field yang dipakai tampilan bot. */
+function shapeDroplet(d) {
+  if (!d) return null;
+  const size = d.size || {};
+  return {
+    id: d.id,
+    name: d.name,
+    status: d.status,
+    ip: publicIpv4(d),
+    region: d.region ? (d.region.name || d.region.slug) : '-',
+    regionSlug: d.region ? d.region.slug : null,
+    sizeSlug: d.size_slug || size.slug || '-',
+    vcpus: d.vcpus,
+    memoryMb: d.memory,
+    diskGb: d.disk,
+    priceMonthly: size.price_monthly != null ? Number(size.price_monthly) : null,
+    image: d.image ? `${d.image.distribution || ''} ${d.image.name || ''}`.trim() : '-',
+    createdAt: d.created_at,
+    locked: !!d.locked,
+    tags: d.tags || []
+  };
+}
+
+/** Daftar droplet (satu halaman). */
+async function listDroplets(token, { page = 1, perPage = 8 } = {}) {
+  const res = await client(token).get('/droplets', { params: { page, per_page: perPage } });
+  const data = res.data || {};
+  const total = (data.meta && Number(data.meta.total)) || (data.droplets || []).length;
+  return { droplets: (data.droplets || []).map(shapeDroplet), total };
+}
+
+/** Detail satu droplet dalam bentuk ringkas. */
+async function getDropletInfo(token, id) {
+  return shapeDroplet(await getDroplet(token, id));
+}
+
+/** Aksi yang boleh dijalankan dari bot. Kunci pendek dipakai di callback_data. */
+const DROPLET_ACTIONS = {
+  on:      { type: 'power_on',       label: 'Menyalakan droplet' },
+  off:     { type: 'shutdown',       label: 'Mematikan droplet (shutdown)' },
+  kill:    { type: 'power_off',      label: 'Mematikan paksa droplet' },
+  reboot:  { type: 'reboot',         label: 'Reboot droplet' },
+  cycle:   { type: 'power_cycle',    label: 'Power cycle droplet' },
+  pwreset: { type: 'password_reset', label: 'Reset password root' },
+  snap:    { type: 'snapshot',       label: 'Membuat snapshot' }
+};
+
+async function dropletAction(token, id, key) {
+  const def = DROPLET_ACTIONS[key];
+  if (!def) throw new Error('DO_INVALID:Aksi tidak dikenal.');
+  const body = { type: def.type };
+  if (def.type === 'snapshot') {
+    body.name = `snap-${id}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`;
+  }
+  const res = await client(token).post(`/droplets/${id}/actions`, body);
+  return (res.data && res.data.action) || null;
+}
+
+async function deleteDroplet(token, id) {
+  await client(token).delete(`/droplets/${id}`);
+  return true;
+}
+
+/** Pemakaian bulan berjalan. null kalau token tidak punya izin billing. */
+async function getBalance(token) {
+  try {
+    const res = await client(token).get('/customers/my/balance');
+    const b = res.data || {};
+    return {
+      monthToDateUsage: b.month_to_date_usage != null ? Number(b.month_to_date_usage) : null,
+      accountBalance: b.account_balance != null ? Number(b.account_balance) : null
+    };
+  } catch (_) {
+    return null;
   }
 }
 
@@ -245,6 +341,12 @@ module.exports = {
   validateToken,
   createDroplets,
   getDroplet,
+  getDropletInfo,
+  listDroplets,
+  dropletAction,
+  deleteDroplet,
+  getBalance,
+  DROPLET_ACTIONS,
   publicIpv4,
   waitForDroplets,
   buildCloudInit,

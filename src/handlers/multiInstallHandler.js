@@ -34,7 +34,7 @@ const {
 } = require('../utils/userManager');
 const installLock = require('../utils/installLock');
 const { isValidRdpPassword, RDP_PASSWORD_RULE } = require('../utils/password');
-const { safeEdit, safeDelete, escapeMd } = require('../utils/telegram');
+const { safeEdit, safeDelete, escapeMd, mdCode } = require('../utils/telegram');
 
 // Batas minimal VPS (samakan dengan install satuan).
 const MIN_CPU = 2;
@@ -174,7 +174,7 @@ async function handleTargetsInput(bot, chatId, text, session, userSessions) {
   for (const line of lines) {
     const parsed = parseTargetLine(line);
     if (parsed === null) continue;
-    if (parsed.error) { errors.push(`• \`${escapeMd(parsed.raw)}\` — ${parsed.error}`); continue; }
+    if (parsed.error) { errors.push(`• \`${mdCode(parsed.raw)}\` — ${parsed.error}`); continue; }
     // Buang IP kembar dalam satu batch: satu VPS tidak boleh dipasang & ditagih
     // dua kali hanya karena barisnya ter-paste dua kali.
     if (seenIp.has(parsed.ip)) { kembar++; continue; }
@@ -369,6 +369,8 @@ function buildRdpPasswordPrompt(session, errorNote = null) {
 }
 
 async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) {
+  // Cegah batch ganda (pesan terkirim dua kali / instalasi lain sedang jalan).
+  if (installLock.isLocked(chatId) || session.step !== 'multi_waiting_rdp_password') return;
   const password = String(text || '');
   if (!isValidRdpPassword(password)) {
     await safeEdit(bot, buildRdpPasswordPrompt(session, RDP_PASSWORD_RULE), {
@@ -433,7 +435,7 @@ function renderBatch(session, states, done = false) {
     else if (s.status === 'failed' || s.status === 'skipped') detail = escapeMd(s.note || '-');
     else if (s.status === 'checking') detail = 'cek spesifikasi';
     else detail = 'antre';
-    return `${emoji} \`${escapeMd(s.ip)}\` — ${detail}`;
+    return `${emoji} \`${mdCode(s.ip)}\` — ${detail}`;
   });
 
   const sukses = states.filter((s) => s.status === 'success').length;
@@ -451,7 +453,7 @@ function renderBatch(session, states, done = false) {
       `\n\n✅ Berhasil: ${sukses}   ❌ Gagal: ${gagal}   ⚠️ Dilewati: ${lewat}\n` +
       `💰 Total dipotong: Rp ${totalCharged.toLocaleString('id-ID')}\n` +
       (sukses > 0
-        ? `\n👤 User: \`admin\`  🔑 Password: \`${escapeMd(session.rdpPassword)}\`\n` +
+        ? `\n👤 User: \`admin\`  🔑 Password: \`${mdCode(session.rdpPassword)}\`\n` +
           `_Monitor tiap VPS: http://<IP>:8006 — tunggu Windows Setup selesai sebelum connect RDP._`
         : '');
   } else {
@@ -608,7 +610,7 @@ async function runBatch(bot, chatId, session, userSessions) {
   });
 
   session.step = 'done';
-  userSessions.delete(chatId);
+  if (userSessions.get(chatId) === session) userSessions.delete(chatId);
 }
 
 module.exports = {

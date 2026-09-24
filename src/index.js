@@ -6,6 +6,10 @@ require('dotenv').config();
 const {
   BUTTON,
   BOT_COMMANDS,
+  BOT_SHORT_DESCRIPTION,
+  BOT_DESCRIPTION,
+  resolveButton,
+  isLegacyButton,
   createMainMenu,
   createPersistentKeyboard
 } = require('./utils/keyboard');
@@ -45,8 +49,9 @@ const { handleProviders } = require('./handlers/providerHandler');
 const broadcastMessage = require('./handlers/broadcastMessage');
 const { handleAddBalance, processAddBalance } = require('./handlers/adminHandler');
 const { getBalance, isAdmin } = require('./utils/userManager');
+const { VPS_CREATE_COST } = require('./config/constants');
 const { INSTALLATION_COST } = require('./config/constants');
-const { safeEdit, safeSend, safeAnswer } = require('./utils/telegram');
+const { safeEdit, safeSend, safeAnswer, escapeMd } = require('./utils/telegram');
 const DatabaseBackup = require('./utils/dbBackup');
 const store = require('./utils/store');
 const BackupTelegram = require('./utils/backupTelegram');
@@ -248,7 +253,24 @@ const dataSiap = siapkanData();
  * Isinya daftar perintah yang bisa DIKLIK — user tidak perlu mengetik /start.
  * Cukup dijalankan sekali saat bot start; Telegram menyimpannya di sisi mereka.
  */
+/** Panggil method Bot API; pakai _request kalau versi library belum punya helper-nya. */
+async function callBotApi(method, form) {
+  if (typeof bot[method] === 'function') return bot[method](form);
+  return bot._request(method, { form });
+}
+
 async function registerBotCommands() {
+  // Deskripsi bot: teks yang tampil di chat KOSONG sebelum user menekan START
+  // ("Apa yang bisa dilakukan bot ini?") dan di profil bot. Dulu tidak pernah
+  // diisi, sehingga user baru hanya melihat layar kosong.
+  try {
+    await callBotApi('setMyDescription', { description: BOT_DESCRIPTION });
+    await callBotApi('setMyShortDescription', { short_description: BOT_SHORT_DESCRIPTION });
+    console.log('Deskripsi bot Telegram diperbarui.');
+  } catch (error) {
+    console.error('Gagal memperbarui deskripsi bot:', error.message);
+  }
+
   try {
     await bot.setMyCommands(BOT_COMMANDS);
     // Pastikan tombol menu menampilkan daftar perintah (bukan web app).
@@ -280,32 +302,61 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 /**
- * Sesi instalasi tidak boleh ditimpa oleh menu lain (deposit, broadcast, dsb).
+ * Deposit boleh dibuka kapan saja.
  *
- * Harus dicek terhadap daftar langkah instalasi, bukan sekadar "punya step".
- * Sesi deposit juga punya step ('waiting_amount'), jadi pengecekan longgar
- * membuat user tidak bisa membuka menu Deposit sama sekali.
+ * Dulu deposit diblokir selama ada sesi alur apa pun ("Selesaikan dulu
+ * instalasi yang sedang berjalan"), termasuk saat user baru di layar
+ * "saldo tidak cukup" pada Multi Install — padahal tombol di layar itu justru
+ * "💰 Deposit". Hasilnya user buntu. Instalasi yang benar-benar berjalan
+ * dijaga oleh installLock (bukan oleh sesi), jadi membuka deposit tidak
+ * mengganggu instalasi apa pun.
  */
-function hasActiveInstall(chatId) {
-  if (isInstalling(chatId)) return true;
-  const s = userSessions.get(chatId);
-  if (!s || !s.step) return false;
-  return INSTALL_STEPS.has(s.step) || DO_STEPS.has(s.step) || MULTI_STEPS.has(s.step);
+async function openDeposit(chatId, messageId) {
+  const session = await handleDeposit(bot, chatId, messageId);
+  userSessions.set(chatId, { ...session, lastActivity: Date.now() });
 }
+
+/** Teks saldo + 5 transaksi terakhir. */
+function buildBalanceText(chatId) {
+  const adminUser = isAdmin(chatId);
+  const saldo = store.getBalance(chatId);
+  const label = { deposit: 'Deposit', deduct: 'Pemakaian', refund_install_failed: 'Refund',
+    refund_cancelled: 'Refund', refund: 'Refund', admin: 'Tambah admin' };
+  const riwayat = store.transactionsFor(chatId, 5);
+  const baris = riwayat.map((t) => {
+    const tgl = t.created_at ? new Date(t.created_at).toLocaleDateString('id-ID') : '-';
+    const n = Number(t.amount) || 0;
+    const tanda = n >= 0 ? '+' : '−';
+    return `• ${tgl} · ${label[t.type] || escapeMd(t.type || '-')} · ${tanda}Rp ${Math.abs(n).toLocaleString('id-ID')}`;
+  });
+  return (
+    `💳 *Saldo Anda:* ${adminUser ? '*Unlimited* (admin)' : `*Rp ${saldo.toLocaleString('id-ID')}*`}\n\n` +
+    `🧾 *5 transaksi terakhir:*\n` +
+    (baris.length ? baris.join('\n') : '_Belum ada transaksi._') +
+    `\n\n_Instalasi RDP: Rp ${INSTALLATION_COST.toLocaleString('id-ID')}/VPS, dipotong hanya kalau berhasil._`
+  );
+}
+
+const balanceKeyboard = {
+  inline_keyboard: [[
+    { text: '💰 Deposit Saldo', callback_data: 'deposit' },
+    { text: '🏠 Menu Utama', callback_data: 'back_to_menu' }
+  ]]
+};
 
 async function buildMenuText(chatId) {
   const balance = await getBalance(chatId);
   const balanceText = isAdmin(chatId)
-    ? 'Unlimited'
+    ? 'Unlimited (admin)'
     : `Rp ${Number(balance).toLocaleString('id-ID')}`;
 
   return `🚀 *Bot Instalasi RDP*\n\n` +
     `👤 ID: \`${chatId}\`\n` +
-    `💰 Saldo: ${balanceText}\n\n` +
-    `Ubah VPS Ubuntu jadi RDP Windows. Rp ${INSTALLATION_COST.toLocaleString('id-ID')}/VPS, ` +
-    `saldo terpotong hanya kalau instalasi berhasil.\n\n` +
-    `⚡️ *Syarat VPS:* ${MIN_CPU} Core · ${MIN_RAM} GB RAM · ${MIN_STORAGE} GB storage kosong\n` +
-    `🆘 Bantuan: wa.me/6285173329868\n\n` +
+    `💰 Saldo: *${balanceText}*\n\n` +
+    `🖥️ Install RDP Windows: Rp ${INSTALLATION_COST.toLocaleString('id-ID')}/VPS, ` +
+    `dipotong hanya kalau berhasil.\n` +
+    `☁️ Control DO via API: gratis (buat droplet Rp ${VPS_CREATE_COST.toLocaleString('id-ID')}/batch).\n` +
+    `⚡️ Syarat VPS RDP: ${MIN_CPU} Core · ${MIN_RAM} GB RAM · ${MIN_STORAGE} GB disk kosong\n\n` +
     `Pilih menu di bawah:`;
 }
 
@@ -315,41 +366,48 @@ async function buildMenuText(chatId) {
  * syarat VPS, dan berapa lama prosesnya. Menu ringkas (buildMenuText) tetap
  * dipakai untuk navigasi "kembali" agar tidak bertele-tele tiap kali.
  */
-async function buildWelcomeText(chatId) {
+async function buildWelcomeText(chatId, firstName = '') {
   const balance = await getBalance(chatId);
   const balanceText = isAdmin(chatId)
     ? 'Unlimited (admin)'
     : `Rp ${Number(balance).toLocaleString('id-ID')}`;
+  const sapa = firstName ? `, ${escapeMd(String(firstName).slice(0, 40))}` : '';
 
   return (
-    `🚀 *Selamat datang di Bot Instalasi RDP*\n\n` +
-    `Bot ini mengubah *VPS Ubuntu* milik Anda menjadi *RDP Windows* yang siap ` +
-    `dipakai — otomatis, tanpa perlu paham teknis. Anda cukup mengirim IP & ` +
-    `password VPS, memilih versi Windows, lalu bot yang mengerjakan sisanya.\n\n` +
+    `👋 *Selamat datang${sapa}!*\n` +
+    `Ini *Bot Instalasi RDP Windows*.\n\n` +
+    `Bot ini mengubah *VPS Ubuntu* Anda menjadi *RDP Windows* siap pakai — ` +
+    `otomatis, tanpa perlu paham teknis. Butuh VPS? Buat langsung di akun ` +
+    `*DigitalOcean* Anda lewat menu *Control DO via API*.\n\n` +
     `👤 ID Anda: \`${chatId}\`\n` +
     `💰 Saldo: *${balanceText}*\n\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
-    `📋 *Menu yang tersedia*\n\n` +
-    `🖥️ *Install RDP* — pasang Windows ke 1 VPS.\n` +
-    `📦 *Multi Install* — pasang ke banyak VPS sekaligus (maks 10 per batch).\n` +
-    `☁️ *Buat VPS* — buat VPS baru di akun DigitalOcean Anda sendiri (pakai ` +
-    `token DO Anda; sewa VPS ditagih DO ke akun Anda).\n` +
-    `💰 *Deposit* — isi saldo via QRIS (GoPay/OVO/DANA/ShopeePay/m-banking).\n` +
-    `💳 *Cek Saldo* · ❓ *FAQ* · 🏢 *Provider* rekomendasi VPS.\n\n` +
+    `📋 *Fitur*\n\n` +
+    `🖥️ *Install RDP* — pasang Windows ke 1 VPS. Kirim IP & password VPS, ` +
+    `pilih Windows (XP, 7, 8.1, 10, 11, Server 2003–2025), selesai.\n` +
+    `📦 *Multi Install RDP* — pasang ke banyak VPS sekaligus (maks 10 per batch).\n` +
+    `☁️ *Control DO via API* — pakai token DigitalOcean Anda: buat droplet 1–10 ` +
+    `sekaligus, lihat daftar, nyalakan/matikan/reboot, reset password, snapshot, ` +
+    `hapus, dan cek tagihan.\n` +
+    `💰 *Deposit Saldo* — isi saldo via QRIS (semua e-wallet & m-banking), masuk otomatis.\n` +
+    `💳 *Saldo & Riwayat* · ❓ *FAQ & Bantuan* · 🏢 *Rekomendasi VPS*\n\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
-    `💵 *Biaya & cara bayar*\n` +
-    `• Instalasi *Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per VPS*.\n` +
-    `• Saldo *hanya dipotong kalau instalasi BERHASIL* — kalau gagal, saldo ` +
-    `utuh, tidak ada potongan.\n` +
-    `• Isi saldo lewat menu *Deposit* → scan QRIS → saldo masuk otomatis.\n\n` +
-    `⚡️ *Syarat minimal VPS*\n` +
-    `• ${MIN_CPU} Core CPU · ${MIN_RAM} GB RAM · ${MIN_STORAGE} GB storage kosong\n` +
-    `• OS *fresh install* Ubuntu 20.04 / 22.04 / 24.04\n\n` +
-    `⏳ *Berapa lama?*\n` +
-    `Instalasi berjalan di VPS Anda selama *±15–45 menit*. Progresnya ` +
-    `ditampilkan langsung di chat ini, dan Anda boleh menutup chat — prosesnya ` +
-    `tetap jalan dan hasilnya dikirim ke sini saat selesai.\n\n` +
-    `🆕 *Baru pertama kali?* Isi saldo dulu di *Deposit*, lalu tekan *Install RDP*.\n` +
+    `💵 *Biaya*\n` +
+    `• Install RDP: *Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per VPS* — saldo ` +
+    `*hanya dipotong kalau instalasi BERHASIL*.\n` +
+    `• Control DO: *gratis*; buat droplet Rp ${VPS_CREATE_COST.toLocaleString('id-ID')} ` +
+    `flat per batch (sewa droplet ditagih DO ke akun Anda).\n` +
+    `• Deposit QRIS: tanpa biaya tambahan, bayar sesuai nominal.\n\n` +
+    `⚡️ *Syarat VPS untuk RDP*\n` +
+    `• Minimal ${MIN_CPU} Core · ${MIN_RAM} GB RAM · ${MIN_STORAGE} GB disk kosong\n` +
+    `• OS *fresh install* Ubuntu 20.04 / 22.04 / 24.04, akses root\n` +
+    `• Disarankan VPS yang mendukung KVM (lihat 🏢 Rekomendasi VPS)\n\n` +
+    `⏳ *Lama instalasi:* ±15–45 menit. Progres tampil di chat ini; Anda boleh ` +
+    `menutup Telegram — proses tetap jalan dan hasilnya dikirim ke sini.\n\n` +
+    `🆕 *Cara mulai:*\n` +
+    `1. Tekan *💰 Deposit Saldo* → scan QRIS\n` +
+    `2. Tekan *🖥️ Install RDP* → kirim IP & password VPS\n` +
+    `3. Pilih versi Windows & buat password RDP → tunggu selesai\n\n` +
     `🆘 Bantuan admin: wa.me/6285173329868\n\n` +
     `Pilih menu di bawah untuk mulai 👇`
   );
@@ -368,8 +426,8 @@ async function sendMainMenu(chatId) {
  * Hanya dikirim sekali per chat selama proses bot hidup, supaya tidak spam.
  */
 const keyboardInstalled = new Set();
-async function ensurePersistentKeyboard(chatId) {
-  if (keyboardInstalled.has(chatId)) return;
+async function ensurePersistentKeyboard(chatId, force = false) {
+  if (keyboardInstalled.has(chatId) && !force) return;
   keyboardInstalled.add(chatId);
   await safeSend(bot, chatId,
     '⌨️ Menu cepat sudah aktif di bawah — tidak perlu mengetik perintah lagi.',
@@ -392,8 +450,11 @@ bot.onText(/^\/start\b/, async (msg) => {
   try {
     await dataSiap;
     const chatId = msg.chat.id;
-    await ensurePersistentKeyboard(chatId);
-    await safeSend(bot, chatId, await buildWelcomeText(chatId), {
+    // Catat user sejak /start pertama, supaya ikut menerima broadcast walau
+    // belum pernah deposit (dulu user baru tercatat hanya saat saldo berubah).
+    if (chatId > 0) store.getUser(chatId);
+    await ensurePersistentKeyboard(chatId, true);
+    await safeSend(bot, chatId, await buildWelcomeText(chatId, msg.from && msg.from.first_name), {
       parse_mode: 'Markdown',
       ...createMainMenu(isAdmin(chatId))
     });
@@ -418,7 +479,8 @@ bot.onText(/^\/multiinstall\b/, async (msg) => {
   await runOnFreshMessage(chatId, (mid) => startMultiInstall(bot, chatId, mid, userSessions));
 });
 
-bot.onText(/^\/createvps\b/, async (msg) => {
+// /do (baru) dan /createvps (lama) sama-sama membuka Control DO via API.
+bot.onText(/^\/(do|createvps)\b/, async (msg) => {
   await dataSiap;
   const chatId = msg.chat.id;
   await ensurePersistentKeyboard(chatId);
@@ -428,15 +490,8 @@ bot.onText(/^\/createvps\b/, async (msg) => {
 bot.onText(/^\/deposit\b/, async (msg) => {
   await dataSiap;
   const chatId = msg.chat.id;
-  if (hasActiveInstall(chatId)) {
-    await safeSend(bot, chatId, '⏳ Selesaikan dulu instalasi yang sedang berjalan.');
-    return;
-  }
   await ensurePersistentKeyboard(chatId);
-  await runOnFreshMessage(chatId, async (mid) => {
-    const session = await handleDeposit(bot, chatId, mid);
-    userSessions.set(chatId, { ...session, lastActivity: Date.now() });
-  });
+  await runOnFreshMessage(chatId, (mid) => openDeposit(chatId, mid));
 });
 
 bot.onText(/^\/saldo\b/, async (msg) => {
@@ -445,18 +500,9 @@ bot.onText(/^\/saldo\b/, async (msg) => {
   await dataSiap;
   const chatId = msg.chat.id;
   try {
-    const balance = await getBalance(chatId);
-    const text = isAdmin(chatId)
-      ? '💳 Saldo Anda: *Unlimited* (admin)'
-      : `💳 Saldo Anda: *Rp ${Number(balance).toLocaleString('id-ID')}*`;
-    await safeSend(bot, chatId, text, {
+    await safeSend(bot, chatId, buildBalanceText(chatId), {
       parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [[
-          { text: '💰 Deposit', callback_data: 'deposit' },
-          { text: '🏠 Menu', callback_data: 'back_to_menu' }
-        ]]
-      }
+      reply_markup: balanceKeyboard
     });
   } catch (error) {
     console.error('Error /saldo:', error);
@@ -492,8 +538,11 @@ bot.onText(/^\/batal\b/, async (msg) => {
 });
 
 /** Aksi untuk tombol keyboard persisten (mengirim teks, bukan callback). */
-async function handleKeyboardButton(chatId, text) {
+async function handleKeyboardButton(chatId, rawText) {
   await dataSiap;
+  const text = resolveButton(rawText);
+  // Tombol dari keyboard versi lama → pasang keyboard baru sekali.
+  if (isLegacyButton(rawText)) await ensurePersistentKeyboard(chatId, true);
   switch (text) {
     case BUTTON.INSTALL:
       await runOnFreshMessage(chatId, (mid) => handleInstallRDP(bot, chatId, mid, userSessions));
@@ -503,30 +552,20 @@ async function handleKeyboardButton(chatId, text) {
       await runOnFreshMessage(chatId, (mid) => startMultiInstall(bot, chatId, mid, userSessions));
       break;
 
-    case BUTTON.CREATE_VPS:
+    case BUTTON.DO_CONTROL:
       await runOnFreshMessage(chatId, (mid) => startDO(bot, chatId, mid, userSessions));
       break;
 
     case BUTTON.DEPOSIT:
-      if (hasActiveInstall(chatId)) {
-        await safeSend(bot, chatId, '⏳ Selesaikan dulu instalasi yang sedang berjalan.');
-        break;
-      }
-      await runOnFreshMessage(chatId, async (mid) => {
-        const session = await handleDeposit(bot, chatId, mid);
-        userSessions.set(chatId, { ...session, lastActivity: Date.now() });
-      });
+      await runOnFreshMessage(chatId, (mid) => openDeposit(chatId, mid));
       break;
 
-    case BUTTON.BALANCE: {
-      const balance = await getBalance(chatId);
-      await safeSend(bot, chatId,
-        isAdmin(chatId)
-          ? '💳 Saldo Anda: *Unlimited* (admin)'
-          : `💳 Saldo Anda: *Rp ${Number(balance).toLocaleString('id-ID')}*`,
-        { parse_mode: 'Markdown' });
+    case BUTTON.BALANCE:
+      await safeSend(bot, chatId, buildBalanceText(chatId), {
+        parse_mode: 'Markdown',
+        reply_markup: balanceKeyboard
+      });
       break;
-    }
 
     case BUTTON.FAQ:
       await runOnFreshMessage(chatId, (mid) => handleFAQ(bot, chatId, mid));
@@ -561,7 +600,7 @@ bot.on('message', async (msg) => {
      * Diproses SEBELUM sesi, supaya user yang tersangkut di tengah alur
      * tetap bisa keluar lewat tombol (mis. menekan "🏠 Menu Utama").
      */
-    if (Object.values(BUTTON).includes(text)) {
+    if (resolveButton(text)) {
       await handleKeyboardButton(chatId, text);
       return;
     }
@@ -570,8 +609,10 @@ bot.on('message', async (msg) => {
     if (!session) return;
 
     if (session.addingBalance && isAdmin(chatId)) {
-      await processAddBalance(bot, msg);
-      userSessions.delete(chatId);
+      // processAddBalance mengembalikan false kalau formatnya salah — sesi
+      // dipertahankan supaya admin cukup mengirim ulang.
+      const ok = await processAddBalance(bot, msg);
+      if (ok !== false) userSessions.delete(chatId);
       return;
     }
 
@@ -667,18 +708,18 @@ bot.on('callback_query', async (query) => {
         await handleInstallRDP(bot, chatId, messageId, userSessions);
         break;
 
-      case 'deposit': {
-        if (hasActiveInstall(chatId)) {
-          await safeAnswer(bot, query.id, {
-            text: 'Selesaikan atau batalkan instalasi yang sedang berjalan dulu.',
-            show_alert: true
-          });
-          return;
-        }
-        const depositSession = await handleDeposit(bot, chatId, messageId);
-        userSessions.set(chatId, { ...depositSession, lastActivity: Date.now() });
+      case 'deposit':
+        await openDeposit(chatId, messageId);
         break;
-      }
+
+      case 'my_balance':
+        await safeEdit(bot, buildBalanceText(chatId), {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: 'Markdown',
+          reply_markup: balanceKeyboard
+        });
+        break;
 
       case 'faq':
         await handleFAQ(bot, chatId, messageId);
@@ -713,7 +754,7 @@ bot.on('callback_query', async (query) => {
         await dbBackup.handleManageDatabase(chatId, messageId);
         break;
 
-      case 'backup_now':
+      case 'backup_now': {
         if (!isAdmin(chatId)) break;
         await safeEdit(bot, '📤 Mengirim backup database...', {
           chat_id: chatId,
@@ -732,9 +773,17 @@ bot.on('callback_query', async (query) => {
             }
           });
         break;
+      }
 
       case 'show_windows_selection': {
         const rdpSession = userSessions.get(chatId);
+        if (isInstalling(chatId)) {
+          await safeAnswer(bot, query.id, {
+            text: 'Instalasi sedang berjalan. Tunggu sampai selesai ya.',
+            show_alert: true
+          });
+          break;
+        }
         if (!rdpSession || !rdpSession.vpsConfig) {
           await safeAnswer(bot, query.id, {
             text: 'Sesi kadaluarsa. Mulai dari awal ya.',
