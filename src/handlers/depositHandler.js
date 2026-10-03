@@ -102,7 +102,8 @@ async function verifyAndCreditDeposit(bot, ref) {
 
   if (hasil.duplikat) return { state: "already", amount: kredit };
 
-  if (hasil.ok) {
+  // ID negatif = akun website tanpa Telegram; tidak ada chat untuk dikabari.
+  if (hasil.ok && Number(pending.user_id) > 0) {
     bot.sendMessage(
       pending.user_id,
       `✅ *Pembayaran Berhasil!*\n\n` +
@@ -119,8 +120,8 @@ async function verifyAndCreditDeposit(bot, ref) {
         },
       }
     ).catch(() => {});
-    return { state: "credited", amount: kredit };
   }
+  if (hasil.ok) return { state: "credited", amount: kredit };
 
   return { state: "error", amount: kredit };
 }
@@ -327,4 +328,8 @@ module.exports = {
   handleDepositAmount,
   handleDepositCheck,
   verifyAndCreditDeposit,
+  startPaymentMonitor,
+  generateUniqueCode,
+  MIN_DEPOSIT,
+  MAX_DEPOSIT,
 };

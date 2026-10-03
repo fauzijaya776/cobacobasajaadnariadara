@@ -61,6 +61,9 @@ class BackupTelegram {
     return JSON.stringify({
       users: data.users || {},
       deposits: data.deposits || {},
+      web: data.webAccounts || {},
+      holds: data.holds || {},
+      nLog: (data.adminLog || []).length,
       nTrx: (data.transactions || []).length,
       nInst: (data.installations || []).length
     });

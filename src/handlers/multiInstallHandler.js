@@ -463,7 +463,11 @@ function renderBatch(session, states, done = false) {
   return `${header}\n\n${lines.join('\n')}${footer}`;
 }
 
-async function installOne(state, windowsVersion, rdpPassword, chatId) {
+/**
+ * @param {object} opts.prepaid  true = biaya sudah dipotong di depan (website);
+ *   saldo tidak dipotong lagi saat sukses, pemanggil yang me-refund kalau gagal.
+ */
+async function installOne(state, windowsVersion, rdpPassword, chatId, { prepaid = false } = {}) {
   state.status = 'checking';
 
   // 1. Tentukan port SSH.
@@ -541,7 +545,9 @@ async function installOne(state, windowsVersion, rdpPassword, chatId) {
     state.percent = 100;
 
     // Potong Rp1.000 hanya untuk VPS yang benar-benar sukses.
-    if (!isAdmin(chatId)) {
+    if (prepaid) {
+      state.charged = true;
+    } else if (!isAdmin(chatId)) {
       const charged = await deductBalance(chatId, INSTALLATION_COST);
       state.charged = charged;
       if (!charged) {
@@ -614,6 +620,10 @@ async function runBatch(bot, chatId, session, userSessions) {
 }
 
 module.exports = {
+  installOne,
+  parseTargetLine,
+  friendlyError,
+  MAX_TARGETS,
   MULTI_STEPS,
   startMultiInstall,
   handleMultiText,

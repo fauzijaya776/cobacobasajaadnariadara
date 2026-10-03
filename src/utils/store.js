@@ -43,7 +43,16 @@ function dataKosong() {
     // Karena QRIN mengonfirmasi lewat webhook (bukan polling), pemetaan
     // ref->user harus PERMANEN supaya callback yang datang setelah bot restart
     // tetap tahu saldo siapa yang harus ditambah.
-    pendingDeposits: {}
+    pendingDeposits: {},
+    // Akun website: username -> { username, hash, telegram_id, created_at }.
+    // Ditautkan ke telegram_id supaya saldo web = saldo bot.
+    webAccounts: {},
+    // Saldo yang DITAHAN untuk instalasi web yang sedang berjalan:
+    // jobId -> { user_id, amount, at }. Kalau bot restart di tengah jalan, sisa
+    // tahanan dikembalikan otomatis saat start (lihat webApi.js).
+    holds: {},
+    // Catatan aktivitas admin website: [{ at, admin, action, detail, ip }].
+    adminLog: []
   };
 }
 
@@ -187,6 +196,11 @@ class Store {
     d.pendingDeposits = (obj.pendingDeposits && typeof obj.pendingDeposits === 'object')
       ? obj.pendingDeposits : {};
 
+    d.webAccounts = (obj.webAccounts && typeof obj.webAccounts === 'object')
+      ? obj.webAccounts : {};
+    d.holds = (obj.holds && typeof obj.holds === 'object') ? obj.holds : {};
+    d.adminLog = Array.isArray(obj.adminLog) ? obj.adminLog.slice(-3000) : [];
+
     // Nomor urut dihitung sekali di sini. Memakai Math.max(...array) tiap kali
     // menambah data akan melempar RangeError begitu riwayat melewati ~126.000
     // entri — dan itu terjadi persis setelah saldo diubah.
@@ -309,7 +323,7 @@ class Store {
    *
    * @returns {{ok: boolean, balance: number, tersimpan: boolean}}
    */
-  debit(userId, amount) {
+  debit(userId, amount, type = 'deduct') {
     const jumlah = Number(amount);
     if (!Number.isFinite(jumlah) || jumlah <= 0) {
       return { ok: false, balance: this.getBalance(userId), tersimpan: true };
@@ -321,7 +335,7 @@ class Store {
       return { ok: false, balance: Number.isFinite(saldo) ? saldo : 0, tersimpan: true };
     }
 
-    const catatan = this._buatCatatan(userId, -jumlah, 'deduct');
+    const catatan = this._buatCatatan(userId, -jumlah, type);
     u.balance = saldo - jumlah;
     this.data.transactions.push(catatan);
     this._pangkasRiwayat();

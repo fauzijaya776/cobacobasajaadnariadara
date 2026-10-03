@@ -56,6 +56,7 @@ const DatabaseBackup = require('./utils/dbBackup');
 const store = require('./utils/store');
 const BackupTelegram = require('./utils/backupTelegram');
 const pakasir = require('./utils/pakasir');
+const { createWebApi } = require('./webApi');
 
 /* ============ Validasi environment ============ */
 if (!process.env.BOT_TOKEN) {
@@ -100,6 +101,9 @@ async function prosesCallbackPakasir(data) {
 }
 
 const webServer = http.createServer((req, res) => {
+  // ===== API website (web/ di Vercel meneruskan /api/* ke sini) =====
+  if (req.url.startsWith('/api/')) return webApi(req, res);
+
   // ===== Webhook / Callback Pakasir =====
   // Pakasir mengirim POST ke URL callback merchant (mis. https://domain/callback).
   // Terima /callback & /pakasir/callback.
@@ -247,6 +251,7 @@ async function siapkanData() {
 }
 
 const dataSiap = siapkanData();
+const webApi = createWebApi({ bot, dataSiap });
 
 /* ============ Menu perintah Telegram ============
  * setMyCommands membuat tombol "Menu" biru muncul di sebelah kolom ketik.
@@ -321,7 +326,8 @@ function buildBalanceText(chatId) {
   const adminUser = isAdmin(chatId);
   const saldo = store.getBalance(chatId);
   const label = { deposit: 'Deposit', deduct: 'Pemakaian', refund_install_failed: 'Refund',
-    refund_cancelled: 'Refund', refund: 'Refund', admin: 'Tambah admin' };
+    refund_cancelled: 'Refund', refund: 'Refund', admin: 'Tambah admin',
+    install: 'Install RDP (web)', admin_deduct: 'Dikurangi admin' };
   const riwayat = store.transactionsFor(chatId, 5);
   const baris = riwayat.map((t) => {
     const tgl = t.created_at ? new Date(t.created_at).toLocaleDateString('id-ID') : '-';
