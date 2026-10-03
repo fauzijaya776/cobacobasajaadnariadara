@@ -3,7 +3,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LogIn, User, Lock, ShieldCheck } from 'lucide-react';
-import { api } from '../lib';
+import { api, nextPath } from '../lib';
 import { Alert } from '../ui';
 import AuthShell from '../AuthShell';
 
@@ -21,11 +21,11 @@ export default function Login() {
     try {
       if (challenge) {
         await api('/login/otp', { method: 'POST', body: { challenge, code } });
-        return router.replace('/admin');
+        return router.replace(nextPath('/admin'));
       }
       const r = await api('/login', { method: 'POST', body: f });
       if (r.otp) { setChallenge(r.challenge); setBusy(false); return; }
-      router.replace('/');
+      router.replace(nextPath('/'));
     } catch (e) { setErr(e.message); setBusy(false); }
   }
 
@@ -62,7 +62,7 @@ export default function Login() {
           {err && <div className="mt"><Alert tone="bad">{err}</Alert></div>}
           <button className="btn block mt" disabled={busy}>{busy ? <span className="spinner" /> : <LogIn size={17} />} Masuk</button>
         </form>
-        <p className="muted center mt">Belum punya akun? <Link href="/register">Daftar gratis</Link></p>
+        <p className="muted center mt">Belum punya akun? <a href="/register" onClick={(e) => { e.preventDefault(); router.push(`/register${location.search}`); }}>Daftar gratis</a></p>
       </>)}
     </AuthShell>
   );

@@ -6,7 +6,8 @@ const LOKAL = ['Nevacloud', 'Flaz VPS', 'Warnahost', 'OrangeVPS', 'Jetorbit', 'I
 const INTL = ['DigitalOcean', 'LightNode', 'Kuroit', 'OVHcloud', 'Crunchbits', 'HostHatch', 'Hetzner', 'DedicatedCore', 'GreenCloud', 'AkileCloud', 'Ultahost', 'ByteVirt', 'Datawagon', 'Avoro', 'Atlantic.Net', 'Vebble'];
 
 export default function Faq() {
-  const { me } = useMe();
+  // Tamu belum punya `me`; harga & syarat diambil dari /api/info.
+  const { info: me } = useMe();
   const QA = [
     ['Berapa biaya install RDP?', <>{rp(me.installCost)} per VPS. Saldo ditahan saat instalasi dimulai, lalu <b>dikembalikan otomatis</b> untuk VPS yang gagal, tidak memenuhi syarat, atau terhenti karena server restart.</>],
     ['Apa syarat VPS-nya?', <>Minimal {me.minSpecs.cpu} core · {me.minSpecs.ram} GB RAM · {me.minSpecs.storage} GB disk kosong, OS fresh install Ubuntu 20.04/22.04/24.04 dengan akses root. Disarankan VPS yang mendukung KVM.</>],

@@ -35,6 +35,7 @@ const {
   verifyAndCreditDeposit, startPaymentMonitor, generateUniqueCode, MIN_DEPOSIT, MAX_DEPOSIT
 } = require('./handlers/depositHandler');
 const broadcastMessage = require('./handlers/broadcastMessage');
+const { createSshGateway } = require('./webSsh');
 
 const scrypt = promisify(crypto.scrypt);
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -45,6 +46,7 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 const fail = (status, message) => { throw new HttpError(status, message); };
+const DUMMY_HASH = `${'0'.repeat(32)}:${'0'.repeat(128)}`;
 
 /* ============ Password & sesi ============ */
 
@@ -317,6 +319,8 @@ function createWebApi({ bot, dataSiap }) {
       useOtp(tid, body.code);
     } else {
       limit(`reg:${ip}`, 5, 60 * 60 * 1000);
+      // IP di header bisa dipalsukan; batas global mencegah banjir akun spam.
+      limit('reg:all', 60, 60 * 60 * 1000);
     }
 
     const hash = await hashPassword(password);
@@ -348,7 +352,8 @@ function createWebApi({ bot, dataSiap }) {
     limit(`login:${ip}`, 20, 15 * 60 * 1000);
     limit(`loginu:${username}`, 10, 15 * 60 * 1000);
     const acc = accounts()[username];
-    const ok = acc && (await checkPassword(String(body.password || ''), acc.hash));
+    // Tetap hitung scrypt walau username tidak ada, supaya waktu respons tidak membocorkan username.
+    const ok = (await checkPassword(String(body.password || ''), acc ? acc.hash : DUMMY_HASH)) && !!acc;
     const adminAcc = acc && isAdmin(acc.telegram_id);
     if (!ok) {
       if (adminAcc) {
@@ -385,6 +390,36 @@ function createWebApi({ bot, dataSiap }) {
   });
 
   route('POST', /^\/logout$/, null, async () => ({ ok: true, _cookie: '' }));
+
+  /* ---------- Publik ---------- */
+
+  route('GET', /^\/info$/, null, async () => ({
+    installCost: INSTALLATION_COST,
+    vpsCreateCost: VPS_CREATE_COST,
+    minSpecs: { cpu: MIN_CPU, ram: MIN_RAM, storage: MIN_STORAGE },
+    windowsCount: WINDOWS_VERSIONS.length
+  }));
+
+  /* ---------- SSH online: tiket sekali pakai untuk WebSocket ---------- */
+  const sshTickets = new Map(); // ticket -> { uid, username, exp }
+  const takeTicket = (ticket) => {
+    const t = sshTickets.get(String(ticket || ''));
+    if (!t) return null;
+    sshTickets.delete(String(ticket));
+    return t.exp > Date.now() ? t : null;
+  };
+
+  route('POST', /^\/ssh\/ticket$/, 'user', async ({ uid, acc }) => {
+    limit(`ssh:${uid}`, 30, 10 * 60 * 1000);
+    const now = Date.now();
+    for (const [k, t] of sshTickets) if (t.exp < now) sshTickets.delete(k);
+    const ticket = crypto.randomBytes(24).toString('hex');
+    sshTickets.set(ticket, { uid, username: acc.username, exp: now + 60 * 1000 });
+    // Vercel tidak meneruskan WebSocket: browser langsung ke server bot.
+    const base = (process.env.PUBLIC_API_URL || process.env.RENDER_EXTERNAL_URL ||
+      `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
+    return { ticket, wsUrl: `${base.replace(/^http/, 'ws')}/api/ssh/ws` };
+  });
 
   /* ---------- User ---------- */
 
@@ -588,7 +623,9 @@ function createWebApi({ bot, dataSiap }) {
   route('GET', /^\/jobs\/(\w+)$/, 'user', async ({ uid, m, admin }) => {
     const j = jobs.get(m[1]);
     if (!j || (j.userId !== uid && !admin)) fail(404, 'Proses tidak ditemukan (mungkin bot baru restart).');
-    return publicJob(j);
+    const out = publicJob(j);
+    if (j.userId !== uid) out.rootPassword = null;
+    return out;
   });
 
   /* ---------- DigitalOcean (token dikirim browser tiap permintaan, tidak disimpan) ---------- */
@@ -611,6 +648,63 @@ function createWebApi({ bot, dataSiap }) {
     catch (e) { if (e instanceof HttpError) throw e; doFail(e); }
   });
 
+  const doCall = async (fn) => {
+    try { return await fn(); } catch (e) { if (e instanceof HttpError) throw e; doFail(e); }
+  };
+
+  route('GET', /^\/do\/droplets\/(\d+)$/, 'user', async ({ req, m }) => {
+    const token = doToken(req);
+    return doCall(async () => {
+      const [droplet, actions, images] = await Promise.all([
+        DO.getDropletInfo(token, m[1]),
+        DO.listDropletActions(token, m[1]).catch(() => []),
+        DO.listDropletImages(token, m[1]).catch(() => [])
+      ]);
+      return { droplet, actions, images };
+    });
+  });
+
+  // Aksi berparameter: resize, rebuild, rename, restore, snapshot, backup, ipv6.
+  route('POST', /^\/do\/droplets\/(\d+)\/action$/, 'user', async ({ req, m, body }) => {
+    const token = doToken(req);
+    const type = String(body.type || '');
+    const a = { type };
+    if (type === 'resize') {
+      if (!/^[a-z0-9-]{2,40}$/.test(String(body.size || ''))) fail(400, 'Pilih ukuran baru.');
+      a.size = body.size;
+      a.disk = !!body.disk;
+    } else if (type === 'rebuild' || type === 'restore') {
+      const img = String(body.image || '');
+      if (!/^[a-z0-9-]{2,60}$/.test(img)) fail(400, 'Pilih image.');
+      a.image = /^\d+$/.test(img) ? Number(img) : img;
+      if (type === 'restore' && typeof a.image !== 'number') fail(400, 'Restore butuh ID snapshot/backup.');
+    } else if (type === 'rename') {
+      if (!/^[a-zA-Z0-9.-]{1,63}$/.test(String(body.name || ''))) fail(400, 'Nama hanya huruf, angka, titik, dan tanda hubung.');
+      a.name = body.name;
+    } else if (type === 'snapshot') {
+      a.name = String(body.name || `snap-${m[1]}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`).slice(0, 100);
+    }
+    return doCall(async () => ({ action: await DO.dropletActionRaw(token, m[1], a) }));
+  });
+
+  route('GET', /^\/do\/sizes$/, 'user', async ({ req }) => doCall(async () => ({ sizes: await DO.listSizes(doToken(req)) })));
+
+  route('GET', /^\/do\/snapshots$/, 'user', async ({ req }) => doCall(async () => ({ snapshots: await DO.listSnapshots(doToken(req)) })));
+
+  route('DELETE', /^\/do\/snapshots\/(\d+)$/, 'user', async ({ req, m }) => doCall(async () => ({ ok: await DO.deleteSnapshot(doToken(req), m[1]) })));
+
+  route('GET', /^\/do\/keys$/, 'user', async ({ req }) => doCall(async () => ({ keys: await DO.listSshKeys(doToken(req)) })));
+
+  route('POST', /^\/do\/keys$/, 'user', async ({ req, body }) => {
+    const name = String(body.name || '').trim().slice(0, 60);
+    const pub = String(body.public_key || '').trim();
+    if (!name) fail(400, 'Nama key wajib diisi.');
+    if (!/^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp\d+|sk-[a-z0-9@.-]+) [A-Za-z0-9+/=]+/.test(pub)) fail(400, 'Public key tidak valid (mulai dengan ssh-ed25519 / ssh-rsa ...).');
+    return doCall(async () => ({ key: await DO.addSshKey(doToken(req), name, pub) }));
+  });
+
+  route('DELETE', /^\/do\/keys\/(\d+)$/, 'user', async ({ req, m }) => doCall(async () => ({ ok: await DO.deleteSshKey(doToken(req), m[1]) })));
+
   route('POST', /^\/do\/droplets\/(\d+)\/(\w+)$/, 'user', async ({ req, m }) => {
     const token = doToken(req);
     const [, id, key] = m;
@@ -625,10 +719,17 @@ function createWebApi({ bot, dataSiap }) {
   route('POST', /^\/do\/create$/, 'user', async ({ req, body, uid }) => {
     const token = doToken(req);
     const count = parseInt(body.count, 10);
-    if (!DO.findRegion(body.region) || !DO.findSize(body.size) || !DO.findImage(body.image)) fail(400, 'Pilihan droplet tidak valid.');
+    // Image: slug OS dari daftar, atau ID snapshot milik user (angka).
+    const image = /^\d{1,12}$/.test(String(body.image)) ? Number(body.image) : body.image;
+    if (!DO.findRegion(body.region) || !DO.findSize(body.size) || !(typeof image === 'number' || DO.findImage(image))) fail(400, 'Pilihan droplet tidak valid.');
     if (!Number.isInteger(count) || count < 1 || count > MAX_DROPLETS) fail(400, `Jumlah 1-${MAX_DROPLETS}.`);
     const rootPassword = body.rootPassword ? String(body.rootPassword) : DO.genPassword(16);
     if (!isValidVpsPassword(rootPassword)) fail(400, `Password root: ${VPS_PASSWORD_RULE}.`);
+    const userData = String(body.userData || '');
+    if (Buffer.byteLength(userData) > 60 * 1024) fail(400, 'Cloud-init maksimal 60 KB.');
+    const sshKeys = (Array.isArray(body.sshKeys) ? body.sshKeys : []).slice(0, 20).map(Number).filter(Number.isInteger);
+    const tags = (Array.isArray(body.tags) ? body.tags : String(body.tags || '').split(','))
+      .map((x) => String(x).trim().toLowerCase()).filter((x) => /^[a-z0-9:_-]{1,40}$/.test(x)).slice(0, 10);
     if (!(await hasSufficientBalance(uid, VPS_CREATE_COST))) fail(402, 'Saldo tidak cukup.');
     limit(`docreate:${uid}`, 5, 10 * 60 * 1000);
 
@@ -637,7 +738,10 @@ function createWebApi({ bot, dataSiap }) {
     const names = Array.from({ length: count }, (_, i) => `rdp-${String(uid).replace('-', 'w')}-${ts}-${i + 1}`);
     let created;
     try {
-      created = await DO.createDroplets({ token, names, region: body.region, size: body.size, image: body.image, rootPassword });
+      created = await DO.createDroplets({
+        token, names, region: body.region, size: body.size, image, rootPassword,
+        userData, sshKeys, tags, backups: !!body.backups, monitoring: !!body.monitoring, ipv6: body.ipv6 !== false
+      });
     } catch (e) { doFail(e); }
     if (!created.length) fail(502, 'DigitalOcean tidak mengembalikan droplet apa pun.');
 
@@ -889,7 +993,7 @@ function createWebApi({ bot, dataSiap }) {
 
   /* ---------- Dispatcher ---------- */
 
-  return async function handle(req, res) {
+  const handle = async function handle(req, res) {
     if (!process.env.WEB_SECRET) return send(res, 503, { error: 'WEB_SECRET belum diatur di server bot.' });
     const url = new URL(req.url, 'http://localhost');
     const path = url.pathname.replace(/^\/api/, '');
@@ -933,6 +1037,8 @@ function createWebApi({ bot, dataSiap }) {
       send(res, 500, { error: 'Terjadi kesalahan di server.' });
     }
   };
+  handle.upgrade = createSshGateway({ takeTicket });
+  return handle;
 }
 
 module.exports = { createWebApi };

@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Send, UserPlus, KeyRound } from 'lucide-react';
-import { api } from '../lib';
+import { api, nextPath } from '../lib';
 import { Alert } from '../ui';
 import AuthShell from '../AuthShell';
 
@@ -48,7 +48,7 @@ export default function Register() {
     run(async () => {
       const body = useTelegram ? f : { username: f.username, password: f.password };
       await api(reset ? '/reset' : '/register', { method: 'POST', body });
-      router.replace('/');
+      router.replace(nextPath('/'));
     });
   };
 

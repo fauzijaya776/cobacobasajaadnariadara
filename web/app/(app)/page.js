@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { MonitorDown, Layers, Cloud, Wallet, ArrowRight, Activity, Receipt, ShieldCheck } from 'lucide-react';
+import { MonitorDown, Layers, Cloud, Wallet, ArrowRight, Activity, Receipt, ShieldCheck, TerminalSquare, Undo2, Zap, UserPlus, LogIn } from 'lucide-react';
 import { api, rp, tgl, useMe, usePoll, trxLabel, JOB_STATUS } from '../lib';
 import { Alert, Badge, Empty, Progress } from '../ui';
 
@@ -12,7 +12,7 @@ const ACTIONS = [
   ['/deposit', Wallet, 'Deposit', 'Isi saldo via QRIS']
 ];
 
-export default function Dashboard() {
+function Member() {
   const { me } = useMe();
   const [jobs, setJobs] = useState(null);
   const [trx, setTrx] = useState(null);
@@ -111,4 +111,66 @@ export default function Dashboard() {
       </div>
     </div>
   </>);
+}
+
+const FEATURES = [
+  [MonitorDown, 'Install RDP otomatis', 'Ubah VPS Ubuntu menjadi RDP Windows — XP sampai Server 2025 — cukup isi IP & password.'],
+  [Layers, 'Multi install', 'Pasang ke hingga 10 VPS sekaligus, progres per VPS terlihat langsung.'],
+  [Undo2, 'Gagal? Saldo kembali', 'Biaya hanya untuk VPS yang berhasil. Yang gagal otomatis di-refund.'],
+  [Cloud, 'Kontrol DigitalOcean', 'Buat droplet + cloud-init, resize, rebuild, snapshot, SSH key — dari satu dashboard.'],
+  [TerminalSquare, 'SSH online', 'Terminal SSH langsung di browser, tanpa aplikasi tambahan.'],
+  [Wallet, 'Deposit QRIS', 'Semua e-wallet & m-banking, saldo masuk otomatis dalam hitungan detik.']
+];
+
+/** Tampilan untuk pengunjung yang belum login. */
+function Guest() {
+  const { info } = useMe();
+  return (<>
+    <div className="hero" style={{ padding: 32 }}>
+      <div style={{ maxWidth: 560 }}>
+        <div className="label"><Zap size={14} style={{ verticalAlign: -2 }} /> Mulai dari {rp(info.installCost)} per VPS</div>
+        <div className="amount" style={{ fontSize: 30, lineHeight: 1.2, margin: '8px 0' }}>Ubah VPS Ubuntu jadi RDP Windows dalam hitungan menit.</div>
+        <div className="sub">Daftar gratis, deposit via QRIS, pilih Windows, selesai. Gagal install? Saldo otomatis kembali.</div>
+      </div>
+      <div className="row">
+        <Link href="/register" className="btn"><UserPlus size={17} /> Daftar gratis</Link>
+        <Link href="/login" className="btn ghost"><LogIn size={17} /> Masuk</Link>
+      </div>
+    </div>
+
+    <div className="grid grid-3 mt">
+      {FEATURES.map(([Icon, t, d]) => (
+        <div className="card stat" key={t}>
+          <div className="stat-icon"><Icon size={20} /></div>
+          <div><div style={{ fontWeight: 650 }}>{t}</div><div className="small muted">{d}</div></div>
+        </div>
+      ))}
+    </div>
+
+    <div className="grid grid-4 mt">
+      {ACTIONS.map(([href, Icon, t, d]) => (
+        <Link key={href} href={href} className="action">
+          <span className="stat-icon"><Icon size={20} /></span>
+          <span style={{ flex: 1 }}><span className="t">{t}</span><br /><span className="d">{d}</span></span>
+          <ArrowRight size={16} className="muted" />
+        </Link>
+      ))}
+    </div>
+
+    <div className="card mt">
+      <div className="row between">
+        <div className="row"><ShieldCheck size={18} className="muted" />
+          <span className="small muted">
+            Syarat VPS: minimal {info.minSpecs?.cpu} core · {info.minSpecs?.ram} GB RAM · {info.minSpecs?.storage} GB disk kosong, Ubuntu 20.04/22.04/24.04.
+          </span>
+        </div>
+        <Link href="/faq" className="small">Baca FAQ →</Link>
+      </div>
+    </div>
+  </>);
+}
+
+export default function Dashboard() {
+  const { me } = useMe();
+  return me ? <Member /> : <Guest />;
 }

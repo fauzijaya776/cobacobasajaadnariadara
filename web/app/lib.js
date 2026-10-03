@@ -35,6 +35,14 @@ export async function api(path, { method = 'GET', body, headers } = {}) {
   return data;
 }
 
+/** Tujuan setelah login (?next=/do). Hanya path internal, cegah open redirect. */
+export function nextPath(fallback = '/') {
+  try {
+    const n = new URLSearchParams(location.search).get('next') || '';
+    return /^\/(?![/\\])/.test(n) ? n : fallback;
+  } catch (_) { return fallback; }
+}
+
 /** ID user untuk ditampilkan: akun website saja memakai ID negatif. */
 export const userLabel = (id) => (Number(id) < 0 ? `Web #${-Number(id)}` : String(id));
 

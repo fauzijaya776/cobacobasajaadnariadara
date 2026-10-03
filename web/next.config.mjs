@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 // sendiri: saldo & riwayat tetap satu sumber dengan bot Telegram.
 const BOT_API_URL = (process.env.BOT_API_URL || 'http://localhost:3000').replace(/\/+$/, '');
 const dev = process.env.NODE_ENV !== 'production';
+// SSH online memakai WebSocket langsung ke server bot (Vercel tidak meneruskan WS).
+const WS_ORIGIN = BOT_API_URL.replace(/^http/, 'ws');
 
 // CSP: semua dari domain sendiri. 'unsafe-inline' untuk script dibutuhkan
 // Next.js (skrip hidrasi inline); eval hanya diizinkan saat development.
@@ -14,7 +16,7 @@ const CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  `connect-src 'self' ${WS_ORIGIN}`,
   "frame-ancestors 'none'",
   "form-action 'self'",
   "base-uri 'self'",

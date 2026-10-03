@@ -6,7 +6,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "migrasi-json": "node scripts/migrasi-ke-json.js",
-    "test": "node test-webapi.js"
+    "test": "node test-webapi.js && node test-ssh.js"
   },
   "dependencies": {
     "axios": "^1.6.2",
@@ -16,7 +16,8 @@
     "node-schedule": "^2.1.1",
     "node-telegram-bot-api": "^0.64.0",
     "qrcode": "^1.5.3",
-    "ssh2": "^1.14.0"
+    "ssh2": "^1.14.0",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

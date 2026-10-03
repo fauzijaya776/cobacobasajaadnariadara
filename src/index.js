@@ -252,6 +252,8 @@ async function siapkanData() {
 
 const dataSiap = siapkanData();
 const webApi = createWebApi({ bot, dataSiap });
+// SSH online (WebSocket) untuk website.
+webServer.on('upgrade', (req, socket, head) => webApi.upgrade(req, socket, head));
 
 /* ============ Menu perintah Telegram ============
  * setMyCommands membuat tombol "Menu" biru muncul di sebelah kolom ketik.

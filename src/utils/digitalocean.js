@@ -139,7 +139,13 @@ function shapeDroplet(d) {
     image: d.image ? `${d.image.distribution || ''} ${d.image.name || ''}`.trim() : '-',
     createdAt: d.created_at,
     locked: !!d.locked,
-    tags: d.tags || []
+    tags: d.tags || [],
+    features: d.features || [],
+    backupIds: d.backup_ids || [],
+    snapshotIds: d.snapshot_ids || [],
+    nextBackup: d.next_backup_window ? d.next_backup_window.start : null,
+    ipv6: ((d.networks && d.networks.v6) || []).map((n) => n.ip_address)[0] || null,
+    privateIp: (((d.networks && d.networks.v4) || []).find((n) => n.type === 'private') || {}).ip_address || null
   };
 }
 
@@ -176,6 +182,116 @@ async function dropletAction(token, id, key) {
   }
   const res = await client(token).post(`/droplets/${id}/actions`, body);
   return (res.data && res.data.action) || null;
+}
+
+/**
+ * Aksi droplet yang butuh parameter (dipakai website). Body sesuai dokumentasi
+ * DigitalOcean "Droplet Actions":
+ *   resize {size, disk}, rebuild {image}, rename {name}, restore {image},
+ *   snapshot {name}, enable_backups, disable_backups, enable_ipv6, dan aksi daya.
+ */
+const ACTION_TYPES = new Set([
+  'power_on', 'shutdown', 'power_off', 'reboot', 'power_cycle', 'password_reset',
+  'snapshot', 'resize', 'rebuild', 'rename', 'restore', 'enable_backups', 'disable_backups', 'enable_ipv6'
+]);
+
+async function dropletActionRaw(token, id, body) {
+  if (!body || !ACTION_TYPES.has(body.type)) throw new Error('DO_INVALID:Aksi tidak dikenal.');
+  const res = await client(token).post(`/droplets/${id}/actions`, body);
+  return (res.data && res.data.action) || null;
+}
+
+/** Riwayat aksi droplet (terbaru dulu). */
+async function listDropletActions(token, id) {
+  const res = await client(token).get(`/droplets/${id}/actions`, { params: { per_page: 20 } });
+  return ((res.data && res.data.actions) || []).map((a) => ({
+    id: a.id, type: a.type, status: a.status, startedAt: a.started_at, completedAt: a.completed_at
+  }));
+}
+
+/** Snapshot & backup milik satu droplet (bisa dipakai untuk restore/rebuild). */
+async function listDropletImages(token, id) {
+  const c = client(token);
+  const [snap, back] = await Promise.all([
+    c.get(`/droplets/${id}/snapshots`, { params: { per_page: 50 } }),
+    c.get(`/droplets/${id}/backups`, { params: { per_page: 50 } }).catch(() => ({ data: {} }))
+  ]);
+  const shape = (kind) => (i) => ({ id: i.id, name: i.name, kind, sizeGb: i.size_gigabytes, createdAt: i.created_at });
+  return [
+    ...((snap.data && snap.data.snapshots) || []).map(shape('snapshot')),
+    ...((back.data && back.data.backups) || []).map(shape('backup'))
+  ];
+}
+
+/** Semua snapshot droplet di akun (untuk halaman kelola snapshot). */
+async function listSnapshots(token) {
+  const res = await client(token).get('/snapshots', { params: { resource_type: 'droplet', per_page: 100 } });
+  return ((res.data && res.data.snapshots) || []).map((s) => ({
+    id: s.id, name: s.name, sizeGb: s.size_gigabytes, minDiskGb: s.min_disk_size,
+    regions: s.regions || [], createdAt: s.created_at, resourceId: s.resource_id
+  }));
+}
+
+async function deleteSnapshot(token, id) {
+  await client(token).delete(`/snapshots/${id}`);
+  return true;
+}
+
+/** Ukuran droplet yang tersedia (live dari DigitalOcean). */
+async function listSizes(token) {
+  const res = await client(token).get('/sizes', { params: { per_page: 200 } });
+  return ((res.data && res.data.sizes) || []).filter((s) => s.available).map((s) => ({
+    slug: s.slug, vcpus: s.vcpus, memoryMb: s.memory, diskGb: s.disk,
+    priceMonthly: s.price_monthly, regions: s.regions || [], description: s.description || ''
+  }));
+}
+
+/* ---------- SSH key akun DigitalOcean ---------- */
+async function listSshKeys(token) {
+  const res = await client(token).get('/account/keys', { params: { per_page: 200 } });
+  return ((res.data && res.data.ssh_keys) || []).map((k) => ({ id: k.id, name: k.name, fingerprint: k.fingerprint }));
+}
+
+async function addSshKey(token, name, publicKey) {
+  const res = await client(token).post('/account/keys', { name, public_key: publicKey });
+  const k = (res.data && res.data.ssh_key) || {};
+  return { id: k.id, name: k.name, fingerprint: k.fingerprint };
+}
+
+async function deleteSshKey(token, id) {
+  await client(token).delete(`/account/keys/${id}`);
+  return true;
+}
+
+/**
+ * Gabungkan cloud-init bawaan (password root) dengan cloud-init / script milik
+ * user. DigitalOcean hanya menerima SATU user_data, jadi keduanya dibungkus
+ * MIME multipart — format resmi cloud-init untuk banyak bagian. Header
+ * Merge-Type membuat runcmd/packages milik user DITAMBAHKAN, bukan menimpa
+ * pengaturan password root.
+ */
+function combineUserData(rootPassword, custom) {
+  const base = buildCloudInit(rootPassword);
+  const extra = String(custom || '').replace(/\r\n/g, '\n').trim();
+  if (!extra) return base;
+  const isScript = extra.startsWith('#!');
+  const boundary = `==RDPBOT${Date.now().toString(36)}==`;
+  return [
+    'Content-Type: multipart/mixed; boundary="' + boundary + '"',
+    'MIME-Version: 1.0',
+    '',
+    '--' + boundary,
+    'Content-Type: text/cloud-config; charset="utf-8"',
+    '',
+    base,
+    '--' + boundary,
+    `Content-Type: ${isScript ? 'text/x-shellscript' : 'text/cloud-config'}; charset="utf-8"`,
+    ...(isScript ? [] : ['Merge-Type: list(append)+dict(no_replace,recurse_list)+str()']),
+    '',
+    extra,
+    '--' + boundary + '--',
+    ''
+  ].join('\n');
 }
 
 async function deleteDroplet(token, id) {
@@ -257,17 +373,21 @@ function buildCloudInit(rootPassword) {
  *
  * @returns {Promise<Array<{id:number,name:string,status:string}>>}
  */
-async function createDroplets({ token, names, region, size, image, rootPassword }) {
+async function createDroplets({
+  token, names, region, size, image, rootPassword,
+  userData = '', sshKeys = [], backups = false, monitoring = false, ipv6 = true, tags = []
+}) {
   const body = {
     names,
     region,
     size,
     image,
-    backups: false,
-    ipv6: true,
-    monitoring: false,
-    user_data: buildCloudInit(rootPassword),
-    tags: ['rdpbot']
+    backups: !!backups,
+    ipv6: !!ipv6,
+    monitoring: !!monitoring,
+    ssh_keys: sshKeys,
+    user_data: combineUserData(rootPassword, userData),
+    tags: ['rdpbot', ...tags]
   };
 
   const res = await client(token).post('/droplets', body);
@@ -345,6 +465,16 @@ module.exports = {
   listDroplets,
   dropletAction,
   deleteDroplet,
+  dropletActionRaw,
+  listDropletActions,
+  listDropletImages,
+  listSnapshots,
+  deleteSnapshot,
+  listSizes,
+  listSshKeys,
+  addSshKey,
+  deleteSshKey,
+  combineUserData,
   getBalance,
   DROPLET_ACTIONS,
   publicIpv4,

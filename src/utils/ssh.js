@@ -145,7 +145,7 @@ const ALGORITMA_LAWAS = {
   ]
 };
 
-function connect({ host, port = 22, username = 'root', password, readyTimeout = READY_TIMEOUT_MS, lawas = false }) {
+function connect({ host, port = 22, username = 'root', password, privateKey, passphrase, readyTimeout = READY_TIMEOUT_MS, lawas = false }) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     let settled = false;
@@ -174,6 +174,7 @@ function connect({ host, port = 22, username = 'root', password, readyTimeout = 
         port,
         username,
         password,
+        ...(privateKey ? { privateKey, passphrase: passphrase || undefined } : {}),
         readyTimeout,
         keepaliveInterval: KEEPALIVE_INTERVAL_MS,
         keepaliveCountMax: KEEPALIVE_COUNT_MAX,
