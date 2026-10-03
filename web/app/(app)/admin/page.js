@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   LayoutDashboard, Users, Wallet, Activity, MonitorDown, Receipt, UserCog, Megaphone, Download,
-  TrendingUp, CircleDollarSign, UserPlus, CheckCircle2, Clock, Lock, Search, RefreshCw, Trash2, KeyRound, ScrollText, ShieldAlert
+  TrendingUp, CircleDollarSign, UserPlus, CheckCircle2, Clock, Lock, Search, RefreshCw, Trash2, KeyRound, ScrollText, ShieldAlert, SlidersHorizontal, Ban, Wrench, Megaphone as AdIcon
 } from 'lucide-react';
 import { api, rp, tgl, useMe, usePoll, userLabel, trxLabel, trxTone, INSTALL_STATUS, JOB_STATUS } from '../../lib';
 import { Alert, Badge, BarChart, Empty, Loading, Modal, Progress, Stat, StatusBadge, useUi } from '../../ui';
@@ -10,7 +10,7 @@ import { Alert, Badge, BarChart, Empty, Loading, Modal, Progress, Stat, StatusBa
 const TABS = [
   ['overview', 'Ringkasan', LayoutDashboard], ['users', 'User', Users], ['deposits', 'Deposit', Wallet],
   ['jobs', 'Proses', Activity], ['inst', 'Instalasi', MonitorDown], ['trx', 'Transaksi', Receipt],
-  ['accounts', 'Akun Web', UserCog], ['broadcast', 'Broadcast', Megaphone], ['log', 'Log Aktivitas', ScrollText]
+  ['accounts', 'Akun Web', UserCog], ['broadcast', 'Broadcast', Megaphone], ['settings', 'Pengaturan', SlidersHorizontal], ['log', 'Log Aktivitas', ScrollText]
 ];
 const shortDay = (d) => { const [, m, day] = d.day.split('-'); return `${Number(day)}/${Number(m)}`; };
 const rpShort = (v, compact) => (compact && v >= 1000 ? `Rp ${Math.round(v / 1000).toLocaleString('id-ID')}rb` : rp(v));
@@ -118,6 +118,17 @@ function UserDetail({ id, onClose, onChanged }) {
       setAmount(''); load(); onChanged();
     } catch (e) { toast(e.message, 'bad'); }
   }
+  async function toggleBlock() {
+    if (d.blocked) {
+      if (!(await confirm({ title: 'Buka blokir?', body: `User ${userLabel(id)} bisa login dan bertransaksi lagi.` }))) return;
+      try { await api(`/admin/users/${id}/block`, { method: 'DELETE' }); toast('Blokir dibuka.'); load(); onChanged(); } catch (e) { toast(e.message, 'bad'); }
+      return;
+    }
+    const reason = prompt('Alasan blokir (opsional, akan dilihat user):', '');
+    if (reason === null) return;
+    try { await api(`/admin/users/${id}/block`, { method: 'POST', body: { reason } }); toast('User diblokir. Saldonya tetap aman.'); load(); onChanged(); } catch (e) { toast(e.message, 'bad'); }
+  }
+
   async function resetPw(e) {
     e.preventDefault();
     try { await api(`/admin/accounts/${d.account.username}/password`, { method: 'POST', body: { password: pw } }); toast('Password akun web diganti.'); setPw(''); }
@@ -130,8 +141,12 @@ function UserDetail({ id, onClose, onChanged }) {
         <div className="grid grid-3">
           <Stat icon={Wallet} label="Saldo" value={rp(d.user.balance)} hint={d.user.admin ? 'Admin (unlimited)' : null} />
           <Stat icon={UserCog} label="Akun web" value={d.account ? d.account.username : '-'} hint={d.account ? `sejak ${tgl(d.account.created_at)}` : 'Belum daftar web'} />
-          <Stat icon={Activity} tone={d.installing ? 'warn' : ''} label="Status" value={d.installing ? 'Menginstal' : 'Idle'} hint={`terdaftar ${tgl(d.user.created_at)}`} />
+          <Stat icon={Activity} tone={d.blocked ? 'bad' : d.installing ? 'warn' : ''} label="Status" value={d.blocked ? 'Diblokir' : d.installing ? 'Menginstal' : 'Aktif'} hint={`terdaftar ${tgl(d.user.created_at)}`} />
         </div>
+        {d.blocked && <div className="mt"><Alert tone="bad">Diblokir oleh <b>{d.blocked.by}</b> pada {tgl(d.blocked.at)}{d.blocked.reason ? ` — ${d.blocked.reason}` : ''}.</Alert></div>}
+        {!d.user.admin && (
+          <div className="mt"><button className={`btn sm ${d.blocked ? 'ghost' : 'danger ghost'}`} onClick={toggleBlock}><Ban size={14} /> {d.blocked ? 'Buka blokir' : 'Blokir user'}</button></div>
+        )}
         <div className="grid grid-2 mt">
           <div>
             <h3>Ubah saldo</h3>
@@ -177,13 +192,50 @@ function UserDetail({ id, onClose, onChanged }) {
 }
 
 /* ================= User ================= */
+/** Form cepat tambah/kurangi saldo: ID Telegram, Web #n, atau username web. */
+function QuickBalance({ onDone }) {
+  const { toast, confirm } = useUi();
+  const [f, setF] = useState({ user_id: '', amount: '' });
+  const [busy, setBusy] = useState(false);
+  const n = parseInt(String(f.amount).replace(/[^\d-]/g, ''), 10);
+  async function submit(e) {
+    e.preventDefault();
+    if (!Number.isInteger(n) || n === 0) return toast('Jumlah tidak valid.', 'bad');
+    if (!(await confirm({ title: n > 0 ? 'Tambah saldo?' : 'Kurangi saldo?', body: `${n > 0 ? 'Tambah' : 'Kurangi'} ${rp(Math.abs(n))} untuk "${f.user_id}". Tercatat di log aktivitas.`, danger: n < 0 }))) return;
+    setBusy(true);
+    try {
+      const r = await api('/admin/balance', { method: 'POST', body: { user_id: f.user_id, amount: n } });
+      toast(`Saldo ${userLabel(r.user_id)} sekarang ${rp(r.balance)}.`);
+      setF({ user_id: f.user_id, amount: '' });
+      onDone();
+    } catch (e) { toast(e.message, 'bad'); }
+    setBusy(false);
+  }
+  return (
+    <form className="card" onSubmit={submit}>
+      <h2><Wallet size={16} style={{ verticalAlign: -2 }} /> Tambah / kurangi saldo</h2>
+      <div className="grid grid-2 mt-s">
+        <div><label style={{ marginTop: 0 }}>User</label>
+          <input value={f.user_id} onChange={(e) => setF({ ...f, user_id: e.target.value })} placeholder="ID Telegram, Web #3, atau username" required /></div>
+        <div><label style={{ marginTop: 0 }}>Jumlah (minus untuk mengurangi)</label>
+          <input value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value.replace(/[^\d-]/g, '') })} placeholder="50000 atau -5000" inputMode="numeric" required /></div>
+      </div>
+      <div className="row mt-s">
+        {[10000, 20000, 50000, 100000].map((v) => <button type="button" key={v} className="chip" onClick={() => setF({ ...f, amount: String(v) })}>{rp(v)}</button>)}
+        <button className="btn" disabled={busy} style={{ marginLeft: 'auto' }}>{busy ? <span className="spinner" /> : <Wallet size={15} />} Simpan</button>
+      </div>
+    </form>
+  );
+}
+
 function UsersTab() {
   const [q, setQ] = useState('');
   const [data, setData] = useState(null);
   const [open, setOpen] = useState(null);
   const load = (query = q) => api(`/admin/users?q=${encodeURIComponent(query)}`).then(setData).catch(() => setData({ users: [], total: 0 }));
   useEffect(() => { load(''); }, []);
-  return (
+  return (<>
+    <QuickBalance onDone={() => load()} />
     <div className="card">
       <form className="input-group" onSubmit={(e) => { e.preventDefault(); load(); }}>
         <div className="input-icon" style={{ flex: 1 }}><Search size={16} />
@@ -196,7 +248,7 @@ function UsersTab() {
           <thead><tr><th>ID user</th><th>Username web</th><th className="right">Saldo</th><th>Terdaftar</th></tr></thead>
           <tbody>{data.users.map((u) => (
             <tr key={u.telegram_id} className="clickable" onClick={() => setOpen(u.telegram_id)}>
-              <td className="mono">{userLabel(u.telegram_id)}</td><td>{u.username || <span className="muted">-</span>}</td>
+              <td className="mono">{userLabel(u.telegram_id)} {u.blocked && <Badge tone="bad">diblokir</Badge>}</td><td>{u.username || <span className="muted">-</span>}</td>
               <td className="right"><b>{rp(u.balance)}</b></td><td>{tgl(u.created_at)}</td>
             </tr>
           ))}</tbody>
@@ -205,7 +257,7 @@ function UsersTab() {
       </>)}
       {open && <UserDetail id={open} onClose={() => setOpen(null)} onChanged={() => load()} />}
     </div>
-  );
+  </>);
 }
 
 /* ================= Deposit ================= */
@@ -419,7 +471,7 @@ function BroadcastTab() {
 const ACTION = {
   login: ['Login', 'ok'], login_gagal: ['Login gagal', 'bad'], saldo_tambah: ['Tambah saldo', 'info'],
   saldo_kurang: ['Kurangi saldo', 'warn'], akun_hapus: ['Hapus akun', 'bad'], akun_reset_password: ['Reset password', 'warn'],
-  broadcast: ['Broadcast', 'info'], backup_unduh: ['Unduh backup', 'warn'], deposit_cek: ['Cek deposit', ''], deposit_hapus: ['Hapus deposit', 'bad']
+  broadcast: ['Broadcast', 'info'], backup_unduh: ['Unduh backup', 'warn'], pengaturan: ['Pengaturan', 'info'], blokir: ['Blokir user', 'bad'], buka_blokir: ['Buka blokir', 'ok'], deposit_cek: ['Cek deposit', ''], deposit_hapus: ['Hapus deposit', 'bad']
 };
 function LogTab() {
   const [q, setQ] = useState('');
@@ -447,7 +499,74 @@ function LogTab() {
   );
 }
 
-const PANELS = { overview: Overview, users: UsersTab, deposits: DepositsTab, jobs: JobsTab, inst: InstallsTab, trx: TrxTab, accounts: AccountsTab, broadcast: BroadcastTab, log: LogTab };
+/* ================= Pengaturan: harga, maintenance, iklan ================= */
+function SettingsTab() {
+  const { toast, confirm } = useUi();
+  const [s, setS] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = () => api('/admin/settings').then(setS).catch((e) => toast(e.message, 'bad'));
+  useEffect(() => { load(); }, []);
+  async function save(body, msg) {
+    setBusy(true);
+    try { await api('/admin/settings', { method: 'POST', body }); toast(msg); load(); } catch (e) { toast(e.message, 'bad'); }
+    setBusy(false);
+  }
+  if (!s) return <Loading />;
+  const toggleMaint = async () => {
+    const on = !s.maintenance.on;
+    if (!(await confirm({ title: on ? 'Aktifkan maintenance?' : 'Matikan maintenance?', body: on
+      ? 'Install RDP, deposit, dan buat droplet DIHENTIKAN untuk semua user (web & bot Telegram). Instalasi yang sedang berjalan tetap lanjut. Admin tetap bisa memakai semua fitur.'
+      : 'Semua layanan kembali normal.', danger: on }))) return;
+    save({ maintenance: { on, message: s.maintenance.message } }, on ? 'Maintenance aktif.' : 'Maintenance dimatikan.');
+  };
+  return (<>
+    <form className="card" onSubmit={(e) => { e.preventDefault(); save({ installCost: s.installCost, vpsCreateCost: s.vpsCreateCost }, 'Harga disimpan — langsung berlaku di web & bot.'); }}>
+      <h2>Harga layanan</h2>
+      <p className="small muted" style={{ margin: '4px 0 0' }}>Berlaku langsung untuk website <b>dan</b> bot Telegram. Instalasi yang sudah berjalan memakai harga saat dimulai.</p>
+      <div className="grid grid-2 mt-s">
+        <div><label>Install RDP (per VPS)</label>
+          <input inputMode="numeric" value={s.installCost} onChange={(e) => setS({ ...s, installCost: e.target.value.replace(/\D/g, '') })} required /></div>
+        <div><label>Buat droplet DigitalOcean (per batch)</label>
+          <input inputMode="numeric" value={s.vpsCreateCost} onChange={(e) => setS({ ...s, vpsCreateCost: e.target.value.replace(/\D/g, '') })} required /></div>
+      </div>
+      <button className="btn mt" disabled={busy}>Simpan harga</button>
+    </form>
+
+    <div className="card">
+      <div className="row between">
+        <div><h2><Wrench size={16} style={{ verticalAlign: -2 }} /> Mode maintenance</h2>
+          <p className="small muted" style={{ margin: '4px 0 0' }}>Hentikan sementara install, deposit, dan buat droplet saat server bermasalah. Saldo user tetap aman.</p></div>
+        <Badge tone={s.maintenance.on ? 'warn' : 'ok'}>{s.maintenance.on ? 'AKTIF' : 'Normal'}</Badge>
+      </div>
+      <label>Pesan untuk user</label>
+      <input value={s.maintenance.message} maxLength={300} onChange={(e) => setS({ ...s, maintenance: { ...s.maintenance, message: e.target.value } })} placeholder="Contoh: Server sedang upgrade, kembali pukul 15.00 WIB." />
+      <div className="row mt-s">
+        <button className={`btn ${s.maintenance.on ? '' : 'danger'}`} disabled={busy} onClick={toggleMaint}>{s.maintenance.on ? 'Matikan maintenance' : 'Aktifkan maintenance'}</button>
+        {s.maintenance.on && <button className="btn ghost" disabled={busy} onClick={() => save({ maintenance: s.maintenance }, 'Pesan maintenance diperbarui.')}>Perbarui pesan</button>}
+      </div>
+    </div>
+
+    <div className="card">
+      <div className="row between">
+        <div><h2><AdIcon size={16} style={{ verticalAlign: -2 }} /> Banner iklan</h2>
+          <p className="small muted" style={{ margin: '4px 0 0' }}>Banner Rental Mail & Kado Virtual di dashboard.</p></div>
+        <button className="btn ghost" disabled={busy} onClick={() => save({ ads: !s.ads }, s.ads ? 'Iklan disembunyikan.' : 'Iklan ditampilkan.')}>{s.ads ? 'Sembunyikan' : 'Tampilkan'}</button>
+      </div>
+    </div>
+
+    <div className="card">
+      <h2><Ban size={16} style={{ verticalAlign: -2 }} /> User diblokir ({s.blocked.length})</h2>
+      {s.blocked.length === 0 ? <p className="small muted">Tidak ada. Blokir user dari tab User → klik user.</p> : (
+        <div className="table-wrap mt-s"><table>
+          <thead><tr><th>User</th><th>Alasan</th><th>Oleh</th><th>Waktu</th></tr></thead>
+          <tbody>{s.blocked.map((b) => <tr key={b.user_id}><td className="mono">{userLabel(b.user_id)}</td><td className="wrap">{b.reason || '-'}</td><td>{b.by}</td><td>{tgl(b.at)}</td></tr>)}</tbody>
+        </table></div>
+      )}
+    </div>
+  </>);
+}
+
+const PANELS = { overview: Overview, users: UsersTab, deposits: DepositsTab, jobs: JobsTab, inst: InstallsTab, trx: TrxTab, accounts: AccountsTab, broadcast: BroadcastTab, settings: SettingsTab, log: LogTab };
 
 export default function Admin() {
   const { me } = useMe();

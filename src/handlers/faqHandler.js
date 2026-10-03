@@ -7,13 +7,13 @@ async function handleFAQ(bot, chatId, messageId) {
 `❓ *FAQ & Bantuan*
 
 🖥️ *Install RDP*
-Ubah VPS Ubuntu jadi RDP Windows. Kirim IP + password VPS, pilih versi Windows, buat password RDP, tunggu ±15–45 menit. ${rp(INSTALLATION_COST)}/VPS, saldo dipotong *hanya kalau berhasil*.
+Ubah VPS Ubuntu jadi RDP Windows. Kirim IP + password VPS, pilih versi Windows, buat password RDP, tunggu ±15–45 menit. ${rp(INSTALLATION_COST())}/VPS, saldo dipotong *hanya kalau berhasil*.
 
 📦 *Multi Install RDP*
 Pasang RDP ke banyak VPS sekaligus (maks 10). Satu baris = satu VPS: \`IP PASSWORD\`. Ditagih per VPS yang berhasil.
 
 ☁️ *Control DO via API*
-Pakai token DigitalOcean Anda sendiri (scope *Write*): buat droplet 1–10 sekaligus (${rp(VPS_CREATE_COST)} flat/batch), lihat daftar, nyalakan/matikan/reboot, reset password root, snapshot, hapus droplet, cek tagihan — selain buat droplet semuanya gratis. Token hanya disimpan sementara di memori bot.
+Pakai token DigitalOcean Anda sendiri (scope *Write*): buat droplet 1–10 sekaligus (${rp(VPS_CREATE_COST())} flat/batch), lihat daftar, nyalakan/matikan/reboot, reset password root, snapshot, hapus droplet, cek tagihan — selain buat droplet semuanya gratis. Token hanya disimpan sementara di memori bot.
 
 💰 *Deposit Saldo*
 Isi saldo via QRIS (semua e-wallet & m-banking). Bayar persis sesuai nominal, saldo masuk otomatis. Kalau belum masuk 1–2 menit, tekan *Cek Status Pembayaran*.

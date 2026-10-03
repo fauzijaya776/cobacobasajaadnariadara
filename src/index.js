@@ -56,6 +56,7 @@ const DatabaseBackup = require('./utils/dbBackup');
 const store = require('./utils/store');
 const BackupTelegram = require('./utils/backupTelegram');
 const pakasir = require('./utils/pakasir');
+const { maintenanceMessage, blockedInfo } = require('./utils/settings');
 const { createWebApi } = require('./webApi');
 
 /* ============ Validasi environment ============ */
@@ -179,6 +180,26 @@ const bot = new TelegramBot(process.env.BOT_TOKEN, {
 });
 
 const userSessions = new Map();
+
+/*
+ * User yang diblokir admin (panel website) tidak bisa memakai bot sama sekali.
+ * Dicegat di processUpdate supaya SEMUA perintah, tombol, dan pesan tertahan
+ * di satu tempat. Pemberitahuan dikirim maksimal sekali per 10 menit.
+ */
+const blockNotice = new Map();
+const processUpdateAsli = bot.processUpdate.bind(bot);
+bot.processUpdate = (update) => {
+  const q = update && update.callback_query;
+  const chatId = (update && update.message && update.message.chat && update.message.chat.id) ||
+    (q && q.message && q.message.chat && q.message.chat.id);
+  const info = chatId && !isAdmin(chatId) && blockedInfo(chatId);
+  if (!info) return processUpdateAsli(update);
+  if (q) bot.answerCallbackQuery(q.id).catch(() => {});
+  if (Date.now() - (blockNotice.get(chatId) || 0) > 10 * 60 * 1000) {
+    blockNotice.set(chatId, Date.now());
+    safeSend(bot, chatId, `⛔ Akun Anda diblokir admin.${info.reason ? `\nAlasan: ${info.reason}` : ''}\n\nHubungi admin: wa.me/6285173329868`).catch(() => {});
+  }
+};
 const dbBackup = new DatabaseBackup(bot);
 
 /* ============ Penyimpanan data ============
@@ -319,6 +340,15 @@ setInterval(() => {
  * mengganggu instalasi apa pun.
  */
 async function openDeposit(chatId, messageId) {
+  // Mode maintenance dari panel admin website (admin tetap boleh).
+  const maint = !isAdmin(chatId) && maintenanceMessage();
+  if (maint) {
+    await safeEdit(bot, `🛠️ Sedang maintenance\n\n${maint}`, {
+      chat_id: chatId, message_id: messageId,
+      reply_markup: { inline_keyboard: [[{ text: '« Kembali', callback_data: 'back_to_menu' }]] }
+    });
+    return;
+  }
   const session = await handleDeposit(bot, chatId, messageId);
   userSessions.set(chatId, { ...session, lastActivity: Date.now() });
 }
@@ -341,7 +371,7 @@ function buildBalanceText(chatId) {
     `💳 *Saldo Anda:* ${adminUser ? '*Unlimited* (admin)' : `*Rp ${saldo.toLocaleString('id-ID')}*`}\n\n` +
     `🧾 *5 transaksi terakhir:*\n` +
     (baris.length ? baris.join('\n') : '_Belum ada transaksi._') +
-    `\n\n_Instalasi RDP: Rp ${INSTALLATION_COST.toLocaleString('id-ID')}/VPS, dipotong hanya kalau berhasil._`
+    `\n\n_Instalasi RDP: Rp ${INSTALLATION_COST().toLocaleString('id-ID')}/VPS, dipotong hanya kalau berhasil._`
   );
 }
 
@@ -361,9 +391,9 @@ async function buildMenuText(chatId) {
   return `🚀 *Bot Instalasi RDP*\n\n` +
     `👤 ID: \`${chatId}\`\n` +
     `💰 Saldo: *${balanceText}*\n\n` +
-    `🖥️ Install RDP Windows: Rp ${INSTALLATION_COST.toLocaleString('id-ID')}/VPS, ` +
+    `🖥️ Install RDP Windows: Rp ${INSTALLATION_COST().toLocaleString('id-ID')}/VPS, ` +
     `dipotong hanya kalau berhasil.\n` +
-    `☁️ Control DO via API: gratis (buat droplet Rp ${VPS_CREATE_COST.toLocaleString('id-ID')}/batch).\n` +
+    `☁️ Control DO via API: gratis (buat droplet Rp ${VPS_CREATE_COST().toLocaleString('id-ID')}/batch).\n` +
     `⚡️ Syarat VPS RDP: ${MIN_CPU} Core · ${MIN_RAM} GB RAM · ${MIN_STORAGE} GB disk kosong\n\n` +
     `Pilih menu di bawah:`;
 }
@@ -401,9 +431,9 @@ async function buildWelcomeText(chatId, firstName = '') {
     `💳 *Saldo & Riwayat* · ❓ *FAQ & Bantuan* · 🏢 *Rekomendasi VPS*\n\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
     `💵 *Biaya*\n` +
-    `• Install RDP: *Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per VPS* — saldo ` +
+    `• Install RDP: *Rp ${INSTALLATION_COST().toLocaleString('id-ID')} per VPS* — saldo ` +
     `*hanya dipotong kalau instalasi BERHASIL*.\n` +
-    `• Control DO: *gratis*; buat droplet Rp ${VPS_CREATE_COST.toLocaleString('id-ID')} ` +
+    `• Control DO: *gratis*; buat droplet Rp ${VPS_CREATE_COST().toLocaleString('id-ID')} ` +
     `flat per batch (sewa droplet ditagih DO ke akun Anda).\n` +
     `• Deposit QRIS: tanpa biaya tambahan, bayar sesuai nominal.\n\n` +
     `⚡️ *Syarat VPS untuk RDP*\n` +

@@ -33,6 +33,7 @@ const {
   updateInstallation
 } = require('../utils/userManager');
 const installLock = require('../utils/installLock');
+const { maintenanceMessage, maintenanceFor } = require('../utils/settings');
 const { isValidRdpPassword, RDP_PASSWORD_RULE } = require('../utils/password');
 const { safeEdit, safeDelete, escapeMd, mdCode } = require('../utils/telegram');
 
@@ -56,6 +57,15 @@ const cancelRow = [{ text: '« Batal', callback_data: 'multi_cancel' }];
 /* Mulai                                                                      */
 /* ========================================================================= */
 async function startMultiInstall(bot, chatId, messageId, userSessions) {
+  // Mode maintenance dari panel admin website (admin tetap boleh).
+  const maint = !isAdmin(chatId) && maintenanceMessage();
+  if (maint) {
+    await safeEdit(bot, `🛠️ Sedang maintenance\n\n${maint}`, {
+      chat_id: chatId, message_id: messageId,
+      reply_markup: { inline_keyboard: [[{ text: '« Kembali', callback_data: 'back_to_menu' }]] }
+    });
+    return;
+  }
   if (installLock.isLocked(chatId)) {
     await safeEdit(bot,
       '⏳ Masih ada instalasi Anda yang berjalan. Tunggu selesai dulu ya.',
@@ -68,11 +78,11 @@ async function startMultiInstall(bot, chatId, messageId, userSessions) {
   }
 
   // Minimal cukup untuk 1 VPS; total per-batch dicek setelah tahu jumlahnya.
-  const cukup = await hasSufficientBalance(chatId, INSTALLATION_COST);
+  const cukup = await hasSufficientBalance(chatId, INSTALLATION_COST());
   if (!cukup) {
     await safeEdit(bot,
       `❌ Saldo tidak mencukupi.\n\n` +
-      `Biaya multi-install: Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per VPS.\n` +
+      `Biaya multi-install: Rp ${INSTALLATION_COST().toLocaleString('id-ID')} per VPS.\n` +
       `Silakan deposit terlebih dahulu.`,
       {
         chat_id: chatId,
@@ -106,7 +116,7 @@ async function startMultiInstall(bot, chatId, messageId, userSessions) {
 function buildTargetsPrompt(errorNote = null) {
   return (
     '🖥️ *Multi Install RDP*\n\n' +
-    `Biaya: *Rp ${INSTALLATION_COST.toLocaleString('id-ID')} per VPS* yang berhasil (maks ${MAX_TARGETS} VPS/batch).\n\n` +
+    `Biaya: *Rp ${INSTALLATION_COST().toLocaleString('id-ID')} per VPS* yang berhasil (maks ${MAX_TARGETS} VPS/batch).\n\n` +
     '📋 *Kirim daftar VPS, satu per baris:*\n' +
     '```\n' +
     'IP:PORT PASSWORD\n' +
@@ -207,12 +217,12 @@ async function handleTargetsInput(bot, chatId, text, session, userSessions) {
 
   // Cek saldo untuk SELURUH batch di depan, supaya tidak ada VPS yang terlanjur
   // terpasang tapi tak bisa ditagih.
-  const needed = valid.length * INSTALLATION_COST;
+  const needed = valid.length * INSTALLATION_COST();
   const cukup = await hasSufficientBalance(chatId, needed);
   if (!cukup && !isAdmin(chatId)) {
     await safeEdit(bot,
       `❌ Saldo tidak cukup untuk ${valid.length} VPS.\n\n` +
-      `Butuh: Rp ${needed.toLocaleString('id-ID')} (Rp ${INSTALLATION_COST.toLocaleString('id-ID')} × ${valid.length})\n` +
+      `Butuh: Rp ${needed.toLocaleString('id-ID')} (Rp ${INSTALLATION_COST().toLocaleString('id-ID')} × ${valid.length})\n` +
       `Kurangi jumlah VPS atau deposit dulu.`,
       {
         chat_id: chatId,
@@ -359,8 +369,8 @@ function buildRdpPasswordPrompt(session, errorNote = null) {
     '📝 *Konfigurasi Multi-Install*\n\n' +
     `🪟 Windows: ${escapeMd(session.windowsVersion.name)}\n` +
     `🖥️ Jumlah VPS: ${session.targets.length}\n` +
-    `💰 Estimasi biaya: s/d Rp ${(session.targets.length * INSTALLATION_COST).toLocaleString('id-ID')} ` +
-    `(Rp ${INSTALLATION_COST.toLocaleString('id-ID')} × VPS yang berhasil)\n\n` +
+    `💰 Estimasi biaya: s/d Rp ${(session.targets.length * INSTALLATION_COST()).toLocaleString('id-ID')} ` +
+    `(Rp ${INSTALLATION_COST().toLocaleString('id-ID')} × VPS yang berhasil)\n\n` +
     '🔑 *Masukkan password RDP Windows:*\n' +
     `_${RDP_PASSWORD_RULE}. Dipakai untuk semua VPS._\n` +
     'Contoh: `Fauzi2024`' +
@@ -382,6 +392,20 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
     return;
   }
 
+  // Maintenance bisa diaktifkan admin saat user sedang di tengah alur.
+  const mt = maintenanceFor(chatId);
+  if (mt) {
+    await safeEdit(bot, `🛠️ Sedang maintenance
+
+${mt}
+
+Saldo Anda tidak terpotong.`, {
+      chat_id: chatId, message_id: session.messageId,
+      reply_markup: { inline_keyboard: [[{ text: '« Menu', callback_data: 'back_to_menu' }]] }
+    });
+    if (userSessions.get(chatId) === session) userSessions.delete(chatId);
+    return;
+  }
   session.rdpPassword = password;
   session.step = 'multi_installing';
   userSessions.set(chatId, session);
@@ -448,7 +472,7 @@ function renderBatch(session, states, done = false) {
 
   let footer;
   if (done) {
-    const totalCharged = states.filter((s) => s.charged).length * INSTALLATION_COST;
+    const totalCharged = states.filter((s) => s.charged).length * INSTALLATION_COST();
     footer =
       `\n\n✅ Berhasil: ${sukses}   ❌ Gagal: ${gagal}   ⚠️ Dilewati: ${lewat}\n` +
       `💰 Total dipotong: Rp ${totalCharged.toLocaleString('id-ID')}\n` +
@@ -515,7 +539,7 @@ async function installOne(state, windowsVersion, rdpPassword, chatId, { prepaid 
     sshPort: resolved.port,
     windowsId: windowsVersion.id,
     windowsName: windowsVersion.name,
-    cost: INSTALLATION_COST,
+    cost: INSTALLATION_COST(),
     status: 'running',
     batch: true
   });
@@ -548,7 +572,7 @@ async function installOne(state, windowsVersion, rdpPassword, chatId, { prepaid 
     if (prepaid) {
       state.charged = true;
     } else if (!isAdmin(chatId)) {
-      const charged = await deductBalance(chatId, INSTALLATION_COST);
+      const charged = await deductBalance(chatId, INSTALLATION_COST());
       state.charged = charged;
       if (!charged) {
         console.error(`[MULTI BILLING] Gagal memotong saldo user ${chatId} untuk ${state.ip}.`);

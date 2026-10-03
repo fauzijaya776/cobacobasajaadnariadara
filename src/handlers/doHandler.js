@@ -144,7 +144,7 @@ function buildTokenPrompt(errorNote = null) {
   return (
     '☁️ *Control DigitalOcean via API*\n\n' +
     'Kelola akun DigitalOcean Anda langsung dari Telegram:\n' +
-    `• ➕ Buat droplet 1-${MAX_DROPLETS} sekaligus (biaya layanan *Rp ${VPS_CREATE_COST.toLocaleString('id-ID')}* flat per batch)\n` +
+    `• ➕ Buat droplet 1-${MAX_DROPLETS} sekaligus (biaya layanan *Rp ${VPS_CREATE_COST().toLocaleString('id-ID')}* flat per batch)\n` +
     '• 📋 Lihat daftar & detail droplet\n' +
     '• 🟢 Nyalakan · 🔴 Matikan · 🔄 Reboot · ⚡ Power cycle\n' +
     '• 🔑 Reset password root · 📸 Snapshot · 🗑️ Hapus droplet\n' +
@@ -506,15 +506,26 @@ async function handleDOCallback(bot, query, userSessions) {
 /* ========================================================================= */
 /* Buat droplet                                                               */
 /* ========================================================================= */
+const { maintenanceMessage, maintenanceFor } = require('../utils/settings');
+
 async function startCreate(bot, chatId, messageId, userSessions) {
+  // Mode maintenance dari panel admin website (admin tetap boleh).
+  const maint = !isAdmin(chatId) && maintenanceMessage();
+  if (maint) {
+    await safeEdit(bot, `🛠️ Sedang maintenance\n\n${maint}`, {
+      chat_id: chatId, message_id: messageId,
+      reply_markup: { inline_keyboard: [[{ text: '« Kembali', callback_data: 'back_to_menu' }]] }
+    });
+    return;
+  }
   const auth = getAuth(chatId);
   if (!auth) return promptToken(bot, chatId, messageId, userSessions);
 
-  const cukup = await hasSufficientBalance(chatId, VPS_CREATE_COST);
+  const cukup = await hasSufficientBalance(chatId, VPS_CREATE_COST());
   if (!cukup) {
     return edit(bot, chatId, messageId,
       `❌ Saldo tidak mencukupi.\n\n` +
-      `Biaya layanan buat droplet: Rp ${VPS_CREATE_COST.toLocaleString('id-ID')} (flat per batch 1-${MAX_DROPLETS} droplet).\n` +
+      `Biaya layanan buat droplet: Rp ${VPS_CREATE_COST().toLocaleString('id-ID')} (flat per batch 1-${MAX_DROPLETS} droplet).\n` +
       `Fitur lain di Control DO tetap gratis.`,
       [[{ text: '💰 Deposit Saldo', callback_data: 'deposit' }, btnMenuDO]]);
   }
@@ -648,7 +659,7 @@ async function showCountSelection(bot, chatId, session) {
     '➕ *Buat Droplet* — langkah 4/5\n\n' +
     `📀 OS: *${mdBold(image.name)}*\n\n` +
     `🔢 *Berapa droplet yang dibuat?* (1-${MAX_DROPLETS})\n` +
-    `_Biaya bot tetap Rp ${VPS_CREATE_COST.toLocaleString('id-ID')} berapa pun jumlahnya. ` +
+    `_Biaya bot tetap Rp ${VPS_CREATE_COST().toLocaleString('id-ID')} berapa pun jumlahnya. ` +
     'Tiap droplet ditagih terpisah oleh DigitalOcean ke akun Anda._',
     keyboard);
 }
@@ -680,6 +691,20 @@ function buildPasswordPrompt(session, errorNote = null) {
 }
 
 async function createAndReport(bot, chatId, session, userSessions) {
+  // Maintenance bisa diaktifkan admin saat user sedang di tengah alur.
+  const mt = maintenanceFor(chatId);
+  if (mt) {
+    await safeEdit(bot, `🛠️ Sedang maintenance
+
+${mt}
+
+Saldo Anda tidak terpotong.`, {
+      chat_id: chatId, message_id: session.messageId,
+      reply_markup: { inline_keyboard: [[{ text: '« Menu', callback_data: 'back_to_menu' }]] }
+    });
+    if (userSessions.get(chatId) === session) userSessions.delete(chatId);
+    return;
+  }
   session.step = 'do_creating';
   userSessions.set(chatId, session);
   const selesai = () => { if (userSessions.get(chatId) === session) userSessions.delete(chatId); };
@@ -729,7 +754,7 @@ async function createAndReport(bot, chatId, session, userSessions) {
   /* Droplet sudah dibuat — BARU sekarang potong biaya layanan bot, flat sekali. */
   let charged = false;
   if (!isAdmin(chatId)) {
-    charged = await deductBalance(chatId, VPS_CREATE_COST);
+    charged = await deductBalance(chatId, VPS_CREATE_COST());
     if (!charged) {
       console.error(`[DO BILLING] Gagal memotong saldo user ${chatId} setelah droplet dibuat.`);
       notifyAdmin(bot, `⚠️ User ${chatId} berhasil membuat ${created.length} droplet DO tapi saldo tidak bisa dipotong.`);
@@ -771,7 +796,7 @@ async function createAndReport(bot, chatId, session, userSessions) {
     '💡 *Cara masuk:* `ssh root@IP` lalu masukkan password di atas.\n' +
     '_Password root aktif ±1-2 menit setelah droplet menyala. Mau pasang RDP? Tunggu 2 menit lalu tekan Install RDP._\n' +
     (charged
-      ? `\n💰 Biaya layanan Rp ${VPS_CREATE_COST.toLocaleString('id-ID')} telah dipotong.`
+      ? `\n💰 Biaya layanan Rp ${VPS_CREATE_COST().toLocaleString('id-ID')} telah dipotong.`
       : (isAdmin(chatId) ? '' : '\n💰 _Catatan: biaya layanan belum bisa dipotong, hubungi admin._')) +
     '\n\n⚠️ Simpan password ini. Sewa droplet ditagih DigitalOcean ke akun Anda.';
 

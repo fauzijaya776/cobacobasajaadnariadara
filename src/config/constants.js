@@ -1,12 +1,17 @@
 const { WINDOWS_VERSIONS } = require('./windows');
-const { VPS_CONFIGS, INSTALLATION_COST } = require('./vps');
+const { VPS_CONFIGS } = require('./vps');
+const { price } = require('../utils/settings');
 
 /**
- * Biaya layanan (bukan tagihan DigitalOcean) untuk membuat 1 batch droplet
- * lewat fitur "Buat VPS". Flat: berapa pun jumlah droplet (1-10), potongannya
- * tetap segini.
+ * Harga berupa FUNGSI karena bisa diubah admin dari panel website kapan saja
+ * (lihat utils/settings.js). Panggil INSTALLATION_COST() setiap kali dipakai,
+ * jangan disimpan ke variabel jangka panjang.
+ *
+ * INSTALLATION_COST(): biaya install RDP per VPS.
+ * VPS_CREATE_COST():   biaya layanan buat droplet DO, flat per batch (1-10).
  */
-const VPS_CREATE_COST = 1000;
+const INSTALLATION_COST = () => price('installCost');
+const VPS_CREATE_COST = () => price('vpsCreateCost');
 
 module.exports = {
   WINDOWS_VERSIONS,

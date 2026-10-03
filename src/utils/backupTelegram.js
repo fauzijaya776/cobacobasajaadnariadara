@@ -64,6 +64,8 @@ class BackupTelegram {
       web: data.webAccounts || {},
       holds: data.holds || {},
       nLog: (data.adminLog || []).length,
+      settings: data.settings || {},
+      blocked: data.blocked || {},
       nTrx: (data.transactions || []).length,
       nInst: (data.installations || []).length
     });

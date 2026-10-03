@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { MonitorDown, Layers, Cloud, Wallet, ArrowRight, Activity, Receipt, ShieldCheck, TerminalSquare, Undo2, Zap, UserPlus, LogIn } from 'lucide-react';
 import { api, rp, tgl, useMe, usePoll, trxLabel, JOB_STATUS } from '../lib';
 import { Alert, Badge, Empty, Progress } from '../ui';
+import Ads from '../Ads';
 
 const ACTIONS = [
   ['/install', MonitorDown, 'Install RDP', 'Pasang Windows ke 1 VPS'],
@@ -13,7 +14,7 @@ const ACTIONS = [
 ];
 
 function Member() {
-  const { me } = useMe();
+  const { me, info } = useMe();
   const [jobs, setJobs] = useState(null);
   const [trx, setTrx] = useState(null);
 
@@ -102,6 +103,8 @@ function Member() {
       </div>
     </div>
 
+    {info.ads && <div className="mt"><Ads /></div>}
+
     <div className="card mt">
       <div className="row"><ShieldCheck size={18} className="muted" />
         <span className="small muted">
@@ -156,6 +159,8 @@ function Guest() {
         </Link>
       ))}
     </div>
+
+    {info.ads && <div className="mt"><Ads /></div>}
 
     <div className="card mt">
       <div className="row between">

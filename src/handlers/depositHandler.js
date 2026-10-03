@@ -3,6 +3,7 @@ const QRCode = require("qrcode");
 const pakasir = require("../utils/pakasir");
 const { createPaymentMessage } = require("../utils/messageFormatter");
 const store = require("../utils/store");
+const { maintenanceFor } = require("../utils/settings");
 
 /* ================== HELPER ================== */
 function generateUniqueCode() {
@@ -215,6 +216,16 @@ async function handleDepositAmount(bot, msg, session) {
   }).catch(() => {});
 
   try {
+    const mt = maintenanceFor(chatId);
+    if (mt) {
+      await bot.editMessageText(`🛠️ Sedang maintenance
+
+${mt}`, {
+        chat_id: chatId, message_id: session.messageId,
+        reply_markup: { inline_keyboard: [[{ text: '« Menu', callback_data: 'back_to_menu' }]] }
+      }).catch(() => {});
+      return true;
+    }
     const reffId = generateUniqueCode();
 
     const paymentData = await pakasir.createPayment(reffId, amount);

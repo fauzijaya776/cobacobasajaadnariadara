@@ -23,6 +23,7 @@ const {
 } = require('../utils/userManager');
 const { safeEdit, safeSend, safeDelete, escapeMd, mdCode, mdBold } = require('../utils/telegram');
 const installLock = require('../utils/installLock');
+const { maintenanceMessage, maintenanceFor } = require('../utils/settings');
 const { isValidRdpPassword, RDP_PASSWORD_RULE } = require('../utils/password');
 
 const MIN_CPU = 2;
@@ -70,6 +71,15 @@ const cancelKeyboard = {
  * instalasi benar-benar berhasil.
  * ========================================================================= */
 async function handleInstallRDP(bot, chatId, messageId, userSessions) {
+  // Mode maintenance dari panel admin website (admin tetap boleh).
+  const maint = !isAdmin(chatId) && maintenanceMessage();
+  if (maint) {
+    await safeEdit(bot, `🛠️ Sedang maintenance\n\n${maint}`, {
+      chat_id: chatId, message_id: messageId,
+      reply_markup: { inline_keyboard: [[{ text: '« Kembali', callback_data: 'back_to_menu' }]] }
+    });
+    return;
+  }
   // Penjaga utama: instalasi yang sedang berjalan tidak bisa dilewati dengan
   // cara apa pun, termasuk menghapus session.
   if (isInstalling(chatId)) {
@@ -108,11 +118,11 @@ async function handleInstallRDP(bot, chatId, messageId, userSessions) {
     return;
   }
 
-  const cukup = await hasSufficientBalance(chatId, INSTALLATION_COST);
+  const cukup = await hasSufficientBalance(chatId, INSTALLATION_COST());
   if (!cukup) {
     await safeEdit(bot,
       `❌ Saldo tidak mencukupi.\n\n` +
-      `Biaya instalasi: Rp ${INSTALLATION_COST.toLocaleString('id-ID')}\n` +
+      `Biaya instalasi: Rp ${INSTALLATION_COST().toLocaleString('id-ID')}\n` +
       `Silakan deposit terlebih dahulu.`,
       {
         chat_id: chatId,
@@ -475,13 +485,13 @@ async function showWindowsSelection(bot, chatId, messageId, page = 0, userSessio
   if (desktopOnPage.length) {
     text += `\n📱 *Desktop:*\n`;
     desktopOnPage.forEach((v) => {
-      text += `${v.id}. ${v.name} (Rp ${v.price.toLocaleString('id-ID')})\n`;
+      text += `${v.id}. ${v.name} (Rp ${INSTALLATION_COST().toLocaleString('id-ID')})\n`;
     });
   }
   if (serverOnPage.length) {
     text += `\n🖥️ *Server:*\n`;
     serverOnPage.forEach((v) => {
-      text += `${v.id}. ${v.name} (Rp ${v.price.toLocaleString('id-ID')})\n`;
+      text += `${v.id}. ${v.name} (Rp ${INSTALLATION_COST().toLocaleString('id-ID')})\n`;
     });
   }
 
@@ -585,7 +595,7 @@ function buildRdpPasswordPrompt(session, errorNote = null) {
   return (
     `📝 *Konfigurasi yang dipilih*\n\n` +
     `🪟 Windows: ${escapeMd(session.windowsVersion.name)}\n` +
-    `💰 Harga: Rp ${session.windowsVersion.price.toLocaleString('id-ID')}\n\n` +
+    `💰 Harga: Rp ${INSTALLATION_COST().toLocaleString('id-ID')}\n\n` +
     `⚙️ *Spesifikasi RDP:*\n` +
     `• CPU: ${c.cpu} Core\n` +
     `• RAM: ${c.ram} GB\n` +
@@ -620,6 +630,20 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
     return;
   }
 
+  // Maintenance bisa diaktifkan admin saat user sedang di tengah alur.
+  const mt = maintenanceFor(chatId);
+  if (mt) {
+    await safeEdit(bot, `🛠️ Sedang maintenance
+
+${mt}
+
+Saldo Anda tidak terpotong.`, {
+      chat_id: chatId, message_id: session.messageId,
+      reply_markup: { inline_keyboard: [[{ text: '« Menu', callback_data: 'back_to_menu' }]] }
+    });
+    if (userSessions.get(chatId) === session) userSessions.delete(chatId);
+    return;
+  }
   session.rdpPassword = password;
   session.step = 'installing';
   session.installStartedAt = Date.now();
@@ -634,7 +658,7 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
     sshPort: session.sshPort,
     windowsId: session.windowsVersion.id,
     windowsName: session.windowsVersion.name,
-    cost: INSTALLATION_COST,
+    cost: INSTALLATION_COST(),
     status: 'running'
   });
   session.installationId = installationId;
@@ -750,7 +774,7 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
     /* --- Instalasi berhasil: BARU sekarang saldo dipotong --- */
     let charged = false;
     if (!isAdmin(chatId)) {
-      charged = await deductBalance(chatId, INSTALLATION_COST);
+      charged = await deductBalance(chatId, INSTALLATION_COST());
       session.charged = charged;
       if (!charged) {
         // Saldo habis dipakai di tempat lain saat instalasi berjalan.
@@ -758,7 +782,7 @@ async function handleRdpPasswordInput(bot, chatId, text, session, userSessions) 
         console.error(`[BILLING] Gagal memotong saldo user ${chatId} setelah instalasi sukses.`);
         await notifyAdmin(bot,
           `⚠️ Instalasi user ${chatId} (${session.ip}) berhasil tapi saldo tidak bisa dipotong.\n` +
-          `Nominal: Rp ${INSTALLATION_COST.toLocaleString('id-ID')}`);
+          `Nominal: Rp ${INSTALLATION_COST().toLocaleString('id-ID')}`);
       }
     }
 
@@ -829,7 +853,7 @@ async function handleInstallFailure(bot, chatId, session, error) {
   console.error(`[INSTALL FAIL] chat=${chatId} ip=${session.ip} code=${code} detail=${detail}`);
 
   if (session.charged) {
-    await refundBalance(chatId, INSTALLATION_COST, 'refund_install_failed');
+    await refundBalance(chatId, INSTALLATION_COST(), 'refund_install_failed');
     session.charged = false;
   }
 
@@ -911,7 +935,7 @@ async function handleCancelInstallation(bot, query, userSessions) {
 
   // Kalau saldo sudah sempat terpotong (alur lama / kasus tepi), kembalikan.
   if (session?.charged) {
-    await refundBalance(chatId, INSTALLATION_COST, 'refund_cancelled');
+    await refundBalance(chatId, INSTALLATION_COST(), 'refund_cancelled');
   }
   if (session?.installationId) {
     await updateInstallation(session.installationId, 'cancelled');

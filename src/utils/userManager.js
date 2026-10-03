@@ -41,6 +41,8 @@ async function addBalance(userId, amount, type = 'deposit') {
  */
 async function deductBalance(userId, amount) {
   if (isAdmin(userId)) return true;
+  // Harga bisa diset Rp0 dari panel admin (gratis): tidak ada yang dipotong.
+  if (Number(amount) === 0) return true;
   try {
     const hasil = store.debit(userId, amount);
     if (hasil.ok && !hasil.tersimpan) {

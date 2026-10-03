@@ -6,6 +6,8 @@ const path = require('path');
 process.env.WEB_SECRET = 'test-secret-'.repeat(4);
 process.env.DATA_FILE = path.join(os.tmpdir(), `webapi-test-${Date.now()}.json`);
 process.env.ADMIN_ID = '999';
+process.env.ADMIN_USERNAME = 'Owner';
+process.env.ADMIN_PASSWORD = 'rahasia-admin-123';
 const store = require('./src/utils/store');
 // Instalasi palsu: IP berakhiran .1 sukses, selain itu gagal.
 const multi = require('./src/handlers/multiInstallHandler');
@@ -52,7 +54,7 @@ const bot = { sendMessage: async (id, text) => {
   assert.equal((await call('GET', '/admin/stats')).status, 403);
 
   // Install: saldo ditahan di depan, VPS gagal di-refund. Harga = INSTALLATION_COST bot.
-  const { INSTALLATION_COST } = require('./src/config/constants');
+  const INSTALLATION_COST = require('./src/config/constants').INSTALLATION_COST();
   const lines = ['10.0.0.1 pw', '10.0.0.2 pw', '10.0.0.3 pw'].join('\n');
   let r = await call('POST', '/install', { lines, windowsId: 3, rdpPassword: 'Abcdefg1' });
   assert.equal(r.status, 200, JSON.stringify(r.data));
@@ -148,6 +150,68 @@ const bot = { sendMessage: async (id, text) => {
     assert.ok(log.some((e) => e.action === a), `log ${a}`);
   }
   assert.ok(log.every((e) => e.admin === 'bos'));
+
+  // Admin dari env Render: login username+password tanpa OTP
+  await call('POST', '/logout');
+  assert.equal((await call('POST', '/register', { username: 'owner', password: 'apapunsaja1' })).status, 409, 'username admin env tidak bisa didaftar');
+  assert.equal((await call('POST', '/login', { username: 'owner', password: 'salah' })).status, 401);
+  r = await call('POST', '/login', { username: 'OWNER', password: 'rahasia-admin-123' });
+  assert.equal(r.status, 200); assert.equal(r.data.admin, true);
+  me = (await call('GET', '/me')).data;
+  assert.ok(me.admin && me.adminVerified && me.envAdmin);
+  assert.equal((await call('GET', '/admin/stats')).status, 200);
+  const envCookie = cookie;
+  // Tambah saldo pakai username, Web #n, dan ID
+  const b0 = store.getBalance(111);
+  assert.equal((await call('POST', '/admin/balance', { user_id: 'budi', amount: '1.000' })).data.balance, b0 + 1000);
+  assert.equal((await call('POST', '/admin/balance', { user_id: `Web #${-webId}`, amount: 500 })).data.user_id, webId);
+  assert.equal((await call('POST', '/admin/balance', { user_id: 'tidakada', amount: 500 })).status, 404);
+  assert.equal((await call('POST', '/password', { old: 'x', password: 'xxxxxxxxxx' })).status, 400);
+  assert.ok((await call('GET', '/admin/log')).data.log.some((e) => e.admin === 'owner' && e.action === 'saldo_tambah'));
+  // Pengaturan: harga, maintenance, iklan, blokir
+  assert.equal((await call('POST', '/admin/settings', { installCost: -5 })).status, 400);
+  assert.equal((await call('POST', '/admin/settings', { installCost: 1500, vpsCreateCost: 2000, ads: false, maintenance: { on: true, message: 'Upgrade server' } })).status, 200);
+  const consts = require('./src/config/constants');
+  assert.equal(consts.INSTALLATION_COST(), 1500, 'harga baru dipakai bot & web');
+  assert.equal(consts.VPS_CREATE_COST(), 2000);
+  let inf = (await call('GET', '/info')).data;
+  assert.equal(inf.installCost, 1500); assert.equal(inf.ads, false); assert.match(inf.maintenance, /Upgrade/);
+  assert.equal((await call('POST', '/admin/users/111/block', { reason: 'spam' })).status, 200);
+  assert.equal((await call('POST', '/admin/users/999/block', {})).status, 400, 'admin tidak bisa diblokir');
+  const adminCookie = cookie;
+  cookie = '';
+  assert.equal((await call('POST', '/login', { username: 'budi', password: 'dariadmin1' })).status, 403, 'user diblokir tidak bisa login');
+  await call('POST', '/login', { username: 'webonly', password: 'webonly123' });
+  r = await call('POST', '/install', { lines: '10.0.0.9 pw', windowsId: 3, rdpPassword: 'Abcdefg1' });
+  assert.equal(r.status, 503, 'maintenance menolak install'); assert.match(r.data.error, /Upgrade/);
+  assert.equal((await call('POST', '/deposit', { amount: 10000 })).status, 503);
+  cookie = adminCookie;
+  assert.equal((await call('GET', '/admin/users/111')).data.blocked.reason, 'spam');
+  assert.equal((await call('DELETE', '/admin/users/111/block')).status, 200);
+  await call('POST', '/admin/settings', { installCost: 1000, vpsCreateCost: 1000, ads: true, maintenance: { on: false } });
+  // Harga Rp0 = gratis: install jalan tanpa memotong saldo
+  await call('POST', '/admin/settings', { installCost: 0 });
+  cookie = '';
+  await call('POST', '/login', { username: 'webonly', password: 'webonly123' });
+  const before0 = (await call('GET', '/me')).data.balance;
+  r = await call('POST', '/install', { lines: '10.0.7.1 pw', windowsId: 3, rdpPassword: 'Abcdefg1' });
+  assert.equal(r.status, 200, 'harga 0 tetap bisa install');
+  await sleep(150);
+  assert.equal((await call('GET', '/me')).data.balance, before0, 'harga 0 tidak memotong saldo');
+  assert.equal(await require('./src/utils/userManager').deductBalance(-1, 0), true);
+  cookie = adminCookie;
+  await call('POST', '/admin/settings', { installCost: 1000 });
+  inf = (await call('GET', '/info')).data;
+  assert.equal(inf.maintenance, null); assert.equal(inf.ads, true);
+  assert.ok((await call('GET', '/admin/log')).data.log.some((e) => e.action === 'blokir'));
+
+  // Ganti ADMIN_PASSWORD -> sesi lama mati
+  process.env.ADMIN_PASSWORD = 'password-baru-456';
+  cookie = envCookie;
+  assert.equal((await call('GET', '/admin/stats')).status, 401);
+  // Password pendek -> admin env nonaktif
+  process.env.ADMIN_PASSWORD = 'pendek';
+  assert.equal((await call('POST', '/login', { username: 'owner', password: 'pendek' })).status, 401);
 
   // Restart di tengah instalasi: sisa tahanan dikembalikan saat start.
   store.data.holds.x = { user_id: 111, amount: 2000, at: new Date().toISOString() };

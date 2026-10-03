@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  LayoutDashboard, MonitorDown, Cloud, Wallet, History, CircleHelp, Settings, LogOut, Menu, Server, TerminalSquare, LogIn, UserPlus, Lock
+  LayoutDashboard, MonitorDown, Cloud, Wallet, History, CircleHelp, Settings, LogOut, Menu, Server, TerminalSquare, LogIn, UserPlus, Lock, Wrench
 } from 'lucide-react';
 import { api, rp, userLabel, MeContext } from '../lib';
 import { UiProvider, Loading } from '../ui';
@@ -66,7 +66,10 @@ export default function AppLayout({ children }) {
         {err ? (
           <div className="card center" style={{ maxWidth: 420 }}>
             <p>{err}</p>
-            <button className="btn" onClick={() => { setErr(''); reload(); api('/info').then(setInfo).catch(() => {}); }}>Coba lagi</button>
+            <div className="row" style={{ justifyContent: 'center' }}>
+              <button className="btn" onClick={() => { setErr(''); reload(); api('/info').then(setInfo).catch(() => {}); }}>Coba lagi</button>
+              <button className="btn ghost" onClick={async () => { await api('/logout', { method: 'POST' }).catch(() => {}); setErr(''); setMe(null); }}>Keluar</button>
+            </div>
           </div>
         ) : <Loading text="Menghubungkan ke server…" />}
       </div>
@@ -132,6 +135,9 @@ export default function AppLayout({ children }) {
                 ? <Link href="/deposit" className="badge info">{me.admin ? 'Unlimited' : rp(me.balance)}</Link>
                 : <Link href={`/login?next=${encodeURIComponent(path)}`} className="btn sm">Masuk</Link>}
             </header>
+            {info?.maintenance && (
+              <div className="maint-bar"><Wrench size={16} /><span><b>Sedang maintenance:</b> {info.maintenance} Install, deposit, dan buat droplet dihentikan sementara.</span></div>
+            )}
             <main className="main">{gated ? <LoginGate path={path} /> : children}</main>
           </div>
         </div>

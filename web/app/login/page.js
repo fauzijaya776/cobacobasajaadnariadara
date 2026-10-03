@@ -25,7 +25,7 @@ export default function Login() {
       }
       const r = await api('/login', { method: 'POST', body: f });
       if (r.otp) { setChallenge(r.challenge); setBusy(false); return; }
-      router.replace(nextPath('/'));
+      router.replace(nextPath(r.admin ? '/admin' : '/'));
     } catch (e) { setErr(e.message); setBusy(false); }
   }
 

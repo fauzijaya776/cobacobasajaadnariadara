@@ -29,6 +29,7 @@ const { WINDOWS_VERSIONS, findVersion, getCompatibleVersions } = require('./conf
 const { INSTALLATION_COST, VPS_CREATE_COST } = require('./config/constants');
 const { isAdmin, hasSufficientBalance, deductBalance } = require('./utils/userManager');
 const { safeSend } = require('./utils/telegram');
+const { settings, maintenanceMessage, blocked, blockedInfo } = require('./utils/settings');
 const { MIN_CPU, MIN_RAM, MIN_STORAGE } = require('./handlers/rdpHandler');
 const { installOne, parseTargetLine, friendlyError, MAX_TARGETS } = require('./handlers/multiInstallHandler');
 const {
@@ -74,7 +75,7 @@ function hmac(body) {
  */
 function makeToken(acc, { admin2fa = false } = {}) {
   const body = Buffer.from(JSON.stringify({
-    u: acc.username, pv: acc.hash.slice(0, 8), a: admin2fa ? 1 : 0,
+    u: acc.username, pv: acc.hash.slice(0, 8), a: admin2fa ? 1 : 0, e: acc.envAdmin ? 1 : 0,
     exp: Date.now() + (admin2fa ? ADMIN_SESSION_MS : SESSION_MS)
   })).toString('base64url');
   return `${body}.${hmac(body)}`;
@@ -95,6 +96,23 @@ function readToken(token) {
 function sessionCookie(token, maxAgeSec) {
   return `sid=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSec}`;
 }
+
+/**
+ * Admin website dari environment server bot (Render):
+ *   ADMIN_USERNAME + ADMIN_PASSWORD (min 10 karakter). Login tanpa OTP.
+ * Tidak disimpan di database. Mengganti ADMIN_PASSWORD = semua sesi admin lama
+ * otomatis keluar. ID user-nya = ID pertama di ADMIN_ID (saldo unlimited).
+ */
+function envAdmin() {
+  const username = String(process.env.ADMIN_USERNAME || '').trim().toLowerCase();
+  const password = String(process.env.ADMIN_PASSWORD || '');
+  if (!username || password.length < 10) return null;
+  const uid = Number(String(process.env.ADMIN_ID || '').split(',')[0].trim()) || 0;
+  const pv = crypto.createHmac('sha256', process.env.WEB_SECRET).update(`envadmin:${password}`).digest('hex').slice(0, 8);
+  return { username, password, telegram_id: uid, hash: `${pv}:env`, envAdmin: true };
+}
+
+const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
 
 function accounts() {
   if (!store.data.webAccounts) store.data.webAccounts = {};
@@ -150,6 +168,17 @@ function nextWebId() {
   for (const k of Object.keys(store.data.users)) { const n = Number(k); if (n < min) min = n; }
   for (const a of Object.values(accounts())) { const n = Number(a.telegram_id); if (n < min) min = n; }
   return min - 1;
+}
+
+/** Target ubah saldo: ID Telegram, "Web #3" / -3, atau username akun web. */
+function resolveUserId(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  const web = s.match(/^web\s*#\s*(\d+)$/);
+  if (web) return -Number(web[1]);
+  if (/^-?\d+$/.test(s)) return parseUserId(s);
+  const acc = accounts()[s.replace(/^@/, '')];
+  if (!acc) fail(404, 'User tidak ditemukan. Isi ID Telegram, Web #n, atau username web.');
+  return Number(acc.telegram_id);
 }
 
 /** ID user untuk rute admin: ID Telegram (positif) atau akun web (negatif). */
@@ -310,7 +339,7 @@ function createWebApi({ bot, dataSiap }) {
     const link = body.telegram_id !== undefined && String(body.telegram_id).trim() !== '';
     if (!/^[a-z0-9_]{3,20}$/.test(username)) fail(400, 'Username 3-20 karakter: huruf kecil, angka, atau _.');
     if (password.length < 8) fail(400, 'Password minimal 8 karakter.');
-    if (accounts()[username]) fail(409, 'Username sudah dipakai.');
+    if (accounts()[username] || (envAdmin() && envAdmin().username === username)) fail(409, 'Username sudah dipakai.');
 
     let tid = null;
     if (link) {
@@ -351,6 +380,25 @@ function createWebApi({ bot, dataSiap }) {
     const username = String(body.username || '').trim().toLowerCase();
     limit(`login:${ip}`, 20, 15 * 60 * 1000);
     limit(`loginu:${username}`, 10, 15 * 60 * 1000);
+
+    const env = envAdmin();
+    if (env && username === env.username) {
+      // Bandingkan hash (panjang sama) supaya waktu & panjang password tidak bocor.
+      const match = crypto.timingSafeEqual(sha(body.password || ''), sha(env.password));
+      await checkPassword('x', DUMMY_HASH);
+      if (!match) {
+        audit(ctx, 'login_gagal', 'password admin salah', username);
+        if (!hits.has(`warn:${username}`)) {
+          hits.set(`warn:${username}`, { n: 1, reset: Date.now() + 10 * 60 * 1000 });
+          notify(env.telegram_id, `⚠️ Percobaan login admin website GAGAL\n👤 ${username}\n🌐 IP ${ctx.ip}\n🕒 ${fmtWaktu()}`);
+        }
+        fail(401, 'Username atau password salah.');
+      }
+      audit(ctx, 'login', `admin · ${userAgent(ctx.req)}`, username);
+      notify(env.telegram_id, `✅ Login admin website BERHASIL\n👤 ${username}\n🌐 IP ${ctx.ip}\n💻 ${userAgent(ctx.req)}\n🕒 ${fmtWaktu()}`);
+      return { ok: true, admin: true, _cookie: makeToken(env, { admin2fa: true }) };
+    }
+
     const acc = accounts()[username];
     // Tetap hitung scrypt walau username tidak ada, supaya waktu respons tidak membocorkan username.
     const ok = (await checkPassword(String(body.password || ''), acc ? acc.hash : DUMMY_HASH)) && !!acc;
@@ -366,6 +414,9 @@ function createWebApi({ bot, dataSiap }) {
       }
       fail(401, 'Username atau password salah.');
     }
+
+    const blok = !adminAcc && blockedInfo(acc.telegram_id);
+    if (blok) fail(403, `Akun Anda diblokir admin.${blok.reason ? ` Alasan: ${blok.reason}` : ''}`);
 
     // Admin wajib langkah kedua: kode OTP ke Telegram admin.
     if (adminAcc) {
@@ -391,11 +442,19 @@ function createWebApi({ bot, dataSiap }) {
 
   route('POST', /^\/logout$/, null, async () => ({ ok: true, _cookie: '' }));
 
+  /** Tolak transaksi baru saat maintenance (admin tetap boleh). */
+  const guardMaint = (ctx) => {
+    const m = !ctx.admin && !isAdmin(ctx.uid) && maintenanceMessage();
+    if (m) fail(503, `Sedang maintenance: ${m}`);
+  };
+
   /* ---------- Publik ---------- */
 
   route('GET', /^\/info$/, null, async () => ({
-    installCost: INSTALLATION_COST,
-    vpsCreateCost: VPS_CREATE_COST,
+    maintenance: maintenanceMessage(),
+    ads: settings().ads !== false,
+    installCost: INSTALLATION_COST(),
+    vpsCreateCost: VPS_CREATE_COST(),
     minSpecs: { cpu: MIN_CPU, ram: MIN_RAM, storage: MIN_STORAGE },
     windowsCount: WINDOWS_VERSIONS.length
   }));
@@ -427,11 +486,12 @@ function createWebApi({ bot, dataSiap }) {
     username: acc.username,
     telegram_id: uid,
     webOnly: uid < 0,
-    admin: isAdmin(uid),
+    admin: isAdmin(uid) || !!acc.envAdmin,
     adminVerified: admin,
+    envAdmin: !!acc.envAdmin,
     balance: store.getBalance(uid),
-    installCost: INSTALLATION_COST,
-    vpsCreateCost: VPS_CREATE_COST,
+    installCost: INSTALLATION_COST(),
+    vpsCreateCost: VPS_CREATE_COST(),
     minSpecs: { cpu: MIN_CPU, ram: MIN_RAM, storage: MIN_STORAGE },
     installing: installLock.isLocked(uid),
     held: Object.values(holds()).filter((h) => Number(h.user_id) === uid).reduce((n, h) => n + h.amount, 0)
@@ -439,6 +499,7 @@ function createWebApi({ bot, dataSiap }) {
 
   route('POST', /^\/password$/, 'user', async ({ body, acc, admin }) => {
     const password = String(body.password || '');
+    if (acc.envAdmin) fail(400, 'Password admin diatur lewat ADMIN_PASSWORD di environment Render.');
     if (password.length < 8) fail(400, 'Password baru minimal 8 karakter.');
     if (!(await checkPassword(String(body.old || ''), acc.hash))) fail(400, 'Password lama salah.');
     acc.hash = await hashPassword(password);
@@ -458,7 +519,9 @@ function createWebApi({ bot, dataSiap }) {
 
   /* ---------- Deposit ---------- */
 
-  route('POST', /^\/deposit$/, 'user', async ({ body, uid }) => {
+  route('POST', /^\/deposit$/, 'user', async (ctx) => {
+    const { body, uid } = ctx;
+    guardMaint(ctx);
     if (!pakasir.isConfigured()) fail(503, 'Pembayaran belum dikonfigurasi admin.');
     const amount = parseInt(String(body.amount || '').replace(/\D/g, ''), 10);
     if (!amount || amount < MIN_DEPOSIT || amount > MAX_DEPOSIT) {
@@ -505,7 +568,9 @@ function createWebApi({ bot, dataSiap }) {
   /* ---------- Install RDP ---------- */
 
   // Cek VPS dulu (spesifikasi, KVM, versi Windows yang muat). Tidak memotong saldo.
-  route('POST', /^\/install\/check$/, 'user', async ({ body, uid }) => {
+  route('POST', /^\/install\/check$/, 'user', async (ctx) => {
+    const { body, uid } = ctx;
+    guardMaint(ctx);
     limit(`check:${uid}`, 20, 10 * 60 * 1000);
     const parsed = parseVpsInput(body.target);
     if (parsed.error) fail(400, INPUT_ERROR_MESSAGES[parsed.error] || 'Format IP tidak valid.');
@@ -544,7 +609,9 @@ function createWebApi({ bot, dataSiap }) {
   });
 
   // Satu jalur untuk install satuan & multi: `lines` = "IP PASSWORD" per baris.
-  route('POST', /^\/install$/, 'user', async ({ body, uid }) => {
+  route('POST', /^\/install$/, 'user', async (ctx) => {
+    const { body, uid } = ctx;
+    guardMaint(ctx);
     if (installLock.isLocked(uid)) fail(409, 'Masih ada instalasi Anda yang berjalan. Tunggu selesai dulu.');
     const version = findVersion(body.windowsId);
     if (!version) fail(400, 'Pilih versi Windows.');
@@ -564,13 +631,13 @@ function createWebApi({ bot, dataSiap }) {
     if (!targets.length) fail(400, 'Isi minimal satu VPS.');
     if (targets.length > MAX_TARGETS) fail(400, `Maksimal ${MAX_TARGETS} VPS per batch.`);
 
-    // Harga sama dengan bot Telegram (INSTALLATION_COST per VPS). Di website
+    // Harga sama dengan bot Telegram (INSTALLATION_COST() per VPS). Di website
     // saldo DITAHAN di depan, lalu dikembalikan per VPS yang gagal/dilewati.
     // Dengan begitu saldo tidak bisa terpakai di tempat lain selama instalasi,
     // dan user tetap tidak rugi kalau gagal.
-    const cost = INSTALLATION_COST;
+    const cost = INSTALLATION_COST();
     const total = targets.length * cost;
-    const prepaid = !isAdmin(uid);
+    const prepaid = !isAdmin(uid) && total > 0;
     const jobId = crypto.randomBytes(8).toString('hex');
     if (prepaid) {
       // Sinkron (tanpa await): potong + catat tahanan tersimpan bersamaan.
@@ -632,7 +699,7 @@ function createWebApi({ bot, dataSiap }) {
 
   route('GET', /^\/do\/options$/, 'user', async () => ({
     regions: DO.DO_REGIONS, sizes: DO.DO_SIZES, images: DO.DO_IMAGES,
-    maxDroplets: MAX_DROPLETS, cost: VPS_CREATE_COST, passwordRule: VPS_PASSWORD_RULE, symbols: VPS_SYMBOLS
+    maxDroplets: MAX_DROPLETS, cost: VPS_CREATE_COST(), passwordRule: VPS_PASSWORD_RULE, symbols: VPS_SYMBOLS
   }));
 
   route('GET', /^\/do\/account$/, 'user', async ({ req }) => {
@@ -716,7 +783,9 @@ function createWebApi({ bot, dataSiap }) {
     return { ok: true };
   });
 
-  route('POST', /^\/do\/create$/, 'user', async ({ req, body, uid }) => {
+  route('POST', /^\/do\/create$/, 'user', async (ctx) => {
+    const { req, body, uid } = ctx;
+    guardMaint(ctx);
     const token = doToken(req);
     const count = parseInt(body.count, 10);
     // Image: slug OS dari daftar, atau ID snapshot milik user (angka).
@@ -730,7 +799,7 @@ function createWebApi({ bot, dataSiap }) {
     const sshKeys = (Array.isArray(body.sshKeys) ? body.sshKeys : []).slice(0, 20).map(Number).filter(Number.isInteger);
     const tags = (Array.isArray(body.tags) ? body.tags : String(body.tags || '').split(','))
       .map((x) => String(x).trim().toLowerCase()).filter((x) => /^[a-z0-9:_-]{1,40}$/.test(x)).slice(0, 10);
-    if (!(await hasSufficientBalance(uid, VPS_CREATE_COST))) fail(402, 'Saldo tidak cukup.');
+    if (!(await hasSufficientBalance(uid, VPS_CREATE_COST()))) fail(402, 'Saldo tidak cukup.');
     limit(`docreate:${uid}`, 5, 10 * 60 * 1000);
 
     const ts = Date.now().toString(36);
@@ -746,7 +815,7 @@ function createWebApi({ bot, dataSiap }) {
     if (!created.length) fail(502, 'DigitalOcean tidak mengembalikan droplet apa pun.');
 
     // Droplet sudah jadi — baru potong biaya layanan, flat sekali.
-    if (!isAdmin(uid) && !(await deductBalance(uid, VPS_CREATE_COST))) {
+    if (!isAdmin(uid) && !(await deductBalance(uid, VPS_CREATE_COST()))) {
       console.error(`[WEB DO BILLING] Gagal memotong saldo user ${uid} setelah droplet dibuat.`);
     }
 
@@ -789,7 +858,8 @@ function createWebApi({ bot, dataSiap }) {
       telegram_id: u.telegram_id,
       username: byTid.get(Number(u.telegram_id)) || null,
       balance: Number(u.balance) || 0,
-      created_at: u.created_at
+      created_at: u.created_at,
+      blocked: !!blockedInfo(u.telegram_id)
     }));
     if (q) rows = rows.filter((r) => String(r.telegram_id).includes(q) || (r.username || '').includes(q));
     rows.sort((a, b) => b.balance - a.balance);
@@ -798,8 +868,8 @@ function createWebApi({ bot, dataSiap }) {
 
   route('POST', /^\/admin\/balance$/, 'admin', async (ctx) => {
     const { body } = ctx;
-    const tid = parseUserId(body.user_id);
-    const amount = parseInt(body.amount, 10);
+    const tid = resolveUserId(body.user_id);
+    const amount = parseInt(String(body.amount ?? '').replace(/[^\d-]/g, ''), 10);
     if (!Number.isInteger(amount) || amount === 0) fail(400, 'Jumlah tidak valid (boleh minus untuk mengurangi).');
     if (Math.abs(amount) > 100_000_000) fail(400, 'Jumlah terlalu besar.');
     const sebelum = store.getBalance(tid);
@@ -810,7 +880,7 @@ function createWebApi({ bot, dataSiap }) {
     notify(tid,
       `💰 Saldo Anda ${amount > 0 ? 'ditambah' : 'dikurangi'} admin sebesar Rp ${Math.abs(amount).toLocaleString('id-ID')}.\n` +
       `💳 Saldo sekarang: Rp ${Number(hasil.balance).toLocaleString('id-ID')}`);
-    return { ok: true, balance: hasil.balance };
+    return { ok: true, balance: hasil.balance, user_id: tid };
   });
 
   route('GET', /^\/admin\/transactions$/, 'admin', async ({ url }) => {
@@ -878,7 +948,7 @@ function createWebApi({ bot, dataSiap }) {
       pendingDeposits: Object.keys(store.data.pendingDeposits || {}).length,
       runningJobs: [...jobs.values()].filter((j) => j.status === 'running').length,
       held: Object.values(holds()).reduce((n, h) => n + h.amount, 0),
-      installCost: INSTALLATION_COST,
+      installCost: INSTALLATION_COST(),
       backupOk: s.bolehCadangkan,
       backupLockReason: s.alasanKunci,
       updated_at: s.updated_at
@@ -894,6 +964,7 @@ function createWebApi({ bot, dataSiap }) {
       user: { telegram_id: tid, balance: Number(u.balance) || 0, created_at: u.created_at, admin: isAdmin(tid) },
       account: acc ? { username: acc.username, created_at: acc.created_at, web_only: !!acc.web_only } : null,
       installing: installLock.isLocked(tid),
+      blocked: blockedInfo(tid),
       transactions: store.transactionsFor(tid, 100),
       installations: store.data.installations.filter((r) => Number(r.user_id) === tid).slice(-50).reverse()
     };
@@ -942,6 +1013,59 @@ function createWebApi({ bot, dataSiap }) {
     if (password.length < 8) fail(400, 'Password minimal 8 karakter.');
     acc.hash = await hashPassword(password);
     audit(ctx, 'akun_reset_password', acc.username);
+    return { ok: true };
+  });
+
+  route('GET', /^\/admin\/settings$/, 'admin', async () => {
+    const s = settings();
+    return {
+      installCost: INSTALLATION_COST(),
+      vpsCreateCost: VPS_CREATE_COST(),
+      maintenance: { on: !!(s.maintenance && s.maintenance.on), message: (s.maintenance && s.maintenance.message) || '' },
+      ads: s.ads !== false,
+      blocked: Object.entries(blocked()).map(([id, b]) => ({ user_id: Number(id), ...b }))
+    };
+  });
+
+  route('POST', /^\/admin\/settings$/, 'admin', async (ctx) => {
+    const { body } = ctx;
+    const s = settings();
+    const changes = [];
+    const setPrice = (key, label) => {
+      if (body[key] === undefined) return;
+      const v = Number(body[key]);
+      if (!Number.isInteger(v) || v < 0 || v > 1_000_000) fail(400, `${label} harus angka 0 – 1.000.000.`);
+      if (v !== Number(s[key] ?? -1)) changes.push(`${label} Rp ${v.toLocaleString('id-ID')}`);
+      s[key] = v;
+    };
+    setPrice('installCost', 'harga install');
+    setPrice('vpsCreateCost', 'biaya buat droplet');
+    if (body.maintenance !== undefined) {
+      const on = !!(body.maintenance && body.maintenance.on);
+      const message = String((body.maintenance && body.maintenance.message) || '').trim().slice(0, 300);
+      changes.push(`maintenance ${on ? 'ON' : 'OFF'}${on && message ? `: ${message}` : ''}`);
+      s.maintenance = { on, message };
+    }
+    if (body.ads !== undefined) { s.ads = !!body.ads; changes.push(`iklan ${s.ads ? 'tampil' : 'disembunyikan'}`); }
+    audit(ctx, 'pengaturan', changes.join(' · ') || 'tidak ada perubahan');
+    return { ok: true };
+  });
+
+  route('POST', /^\/admin\/users\/(-?\d+)\/block$/, 'admin', async (ctx) => {
+    const tid = parseUserId(ctx.m[1]);
+    if (isAdmin(tid)) fail(400, 'Admin tidak bisa diblokir.');
+    const reason = String(ctx.body.reason || '').trim().slice(0, 200);
+    blocked()[String(tid)] = { at: new Date().toISOString(), by: ctx.acc.username, reason };
+    audit(ctx, 'blokir', `user ${tid}${reason ? `: ${reason}` : ''}`);
+    return { ok: true };
+  });
+
+  route('DELETE', /^\/admin\/users\/(-?\d+)\/block$/, 'admin', async (ctx) => {
+    const tid = parseUserId(ctx.m[1]);
+    if (!blockedInfo(tid)) fail(404, 'User tidak sedang diblokir.');
+    delete blocked()[String(tid)];
+    audit(ctx, 'buka_blokir', `user ${tid}`);
+    notify(tid, '✅ Blokir akun Anda sudah dibuka admin. Selamat menggunakan kembali.');
     return { ok: true };
   });
 
@@ -1009,12 +1133,20 @@ function createWebApi({ bot, dataSiap }) {
       if (r.auth) {
         const sid = (String(req.headers.cookie || '').match(/(?:^|;\s*)sid=([^;]+)/) || [])[1];
         const p = readToken(sid);
-        const acc = p && accounts()[p.u];
+        let acc = null;
+        if (p && p.e === 1) {
+          const env = envAdmin();
+          if (env && env.username === p.u) acc = env;
+        } else if (p) {
+          acc = accounts()[p.u];
+        }
         if (!acc || acc.hash.slice(0, 8) !== p.pv) fail(401, 'Silakan login dulu.');
         ctx.acc = acc;
         ctx.uid = Number(acc.telegram_id);
         // Admin = ID ada di ADMIN_ID DAN sesi ini sudah lolos OTP Telegram.
-        ctx.admin = isAdmin(ctx.uid) && p.a === 1;
+        ctx.admin = acc.envAdmin ? true : isAdmin(ctx.uid) && p.a === 1;
+        const blok = !ctx.admin && !isAdmin(ctx.uid) && blockedInfo(ctx.uid);
+        if (blok) fail(403, `Akun Anda diblokir admin.${blok.reason ? ` Alasan: ${blok.reason}` : ''}`);
         if (r.auth === 'admin' && !ctx.admin) {
           fail(403, isAdmin(ctx.uid) ? 'Akses admin butuh verifikasi OTP. Keluar lalu login lagi.' : 'Khusus admin.');
         }

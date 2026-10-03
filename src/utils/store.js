@@ -52,7 +52,11 @@ function dataKosong() {
     // tahanan dikembalikan otomatis saat start (lihat webApi.js).
     holds: {},
     // Catatan aktivitas admin website: [{ at, admin, action, detail, ip }].
-    adminLog: []
+    adminLog: [],
+    // Pengaturan dari panel admin: { installCost, vpsCreateCost, maintenance:{on,message}, ads }
+    settings: {},
+    // User yang diblokir: uid -> { at, by, reason }. Saldo tidak disentuh.
+    blocked: {}
   };
 }
 
@@ -200,6 +204,8 @@ class Store {
       ? obj.webAccounts : {};
     d.holds = (obj.holds && typeof obj.holds === 'object') ? obj.holds : {};
     d.adminLog = Array.isArray(obj.adminLog) ? obj.adminLog.slice(-3000) : [];
+    d.settings = (obj.settings && typeof obj.settings === 'object') ? obj.settings : {};
+    d.blocked = (obj.blocked && typeof obj.blocked === 'object') ? obj.blocked : {};
 
     // Nomor urut dihitung sekali di sini. Memakai Math.max(...array) tiap kali
     // menambah data akan melempar RangeError begitu riwayat melewati ~126.000

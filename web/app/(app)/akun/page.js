@@ -39,6 +39,9 @@ export default function Akun() {
           ? 'Lupa password? Hubungi admin untuk mengatur ulang. Simpan password Anda baik-baik.'
           : 'Akun ini terhubung ke bot Telegram. Saldo, deposit, dan riwayat instalasi sama di keduanya.'}</p>
       </div>
+      {me.envAdmin ? (
+        <div className="card"><h2>Password admin</h2><p className="small muted">Akun admin ini diatur lewat <code>ADMIN_USERNAME</code> dan <code>ADMIN_PASSWORD</code> di environment Render. Ganti di sana untuk mengubah password.</p></div>
+      ) : (
       <form className="card" onSubmit={submit}>
         <h2><KeyRound size={16} style={{ verticalAlign: -2 }} /> Ganti password</h2>
         <label htmlFor="o">Password lama</label>
@@ -49,6 +52,7 @@ export default function Akun() {
         <input id="a" type="password" value={f.again} onChange={(e) => setF({ ...f, again: e.target.value })} autoComplete="new-password" minLength={8} required />
         <button className="btn mt" disabled={busy}>{busy && <span className="spinner" />} Simpan</button>
       </form>
+      )}
     </div>
   </>);
 }
