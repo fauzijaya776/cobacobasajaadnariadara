@@ -15,12 +15,21 @@ async function call(path, body) {
   return { http: res.status, data: res.data || {} };
 }
 
-// "2026-03-27 20:49:00" (WIB) -> ISO
+// "2026-03-27 20:49:00" -> ISO (zona: lihat di bawah)
 function wibToIso(s) {
   if (!s) return null;
   const str = String(s).trim();
-  const d = /[zZ]|[+-]\d\d:?\d\d$/.test(str) ? new Date(str) : new Date(str.replace(" ", "T") + "+07:00");
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  // Dokumentasi menyebut WIB, tetapi API /qris/* nyatanya memakai UTC+8 (transaksi yang sama:
+  // 16:01:37 di /transactions = WIB, 17:01:37 di /qris/status). Waktu tanpa zona dicoba sebagai
+  // +08:00 lalu +07:00; yang masuk akal (QRIS berlaku ±15 menit, maks 20 menit ke depan) dipakai.
+  // Tidak ada yang cocok -> null, dan pemanggil memakai 15 menit dari sekarang.
+  const zoned = /[zZ]|[+-]\d\d:?\d\d$/.test(str);
+  const now = Date.now();
+  for (const c of zoned ? [str] : ["+08:00", "+07:00"].map((z) => str.replace(" ", "T") + z)) {
+    const d = new Date(c);
+    if (!Number.isNaN(d.getTime()) && d.getTime() > now && d.getTime() <= now + 20 * 60 * 1000) return d.toISOString();
+  }
+  return null;
 }
 
 async function generateQris(amount) {
