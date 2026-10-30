@@ -267,7 +267,7 @@ function DepositsTab() {
   const [busy, setBusy] = useState('');
   const load = () => api('/admin/deposits').then(setD).catch((e) => toast(e.message, 'bad'));
   useEffect(() => { load(); }, []);
-  const STATE = { credited: 'Lunas — saldo sudah ditambahkan.', already: 'Sudah lunas sebelumnya.', unpaid: 'Belum dibayar.', expired: 'Kadaluarsa di Pakasir, dihapus dari antrean.', error: 'Gagal menghubungi Pakasir.', unknown: 'Tidak ditemukan.' };
+  const STATE = { credited: 'Lunas — saldo sudah ditambahkan.', already: 'Sudah lunas sebelumnya.', unpaid: 'Belum dibayar.', expired: 'Kadaluarsa di gateway pembayaran, dihapus dari antrean.', error: 'Gagal menghubungi gateway pembayaran.', unknown: 'Tidak ditemukan.' };
   async function check(ref) {
     setBusy(ref);
     try { const r = await api(`/admin/deposits/${ref}/check`, { method: 'POST' }); toast(STATE[r.state] || r.state, r.state === 'error' ? 'bad' : 'ok'); load(); }
@@ -281,13 +281,13 @@ function DepositsTab() {
   if (!d) return <Loading />;
   return (<>
     <div className="card">
-      <div className="card-head"><div><h2>Menunggu pembayaran ({d.pending.length})</h2><p>Cek status langsung ke Pakasir bila user lapor sudah bayar.</p></div>
+      <div className="card-head"><div><h2>Menunggu pembayaran ({d.pending.length})</h2><p>Cek status langsung ke gateway (AutoGoPay/Pakasir) bila user lapor sudah bayar.</p></div>
         <button className="btn ghost sm" onClick={load}><RefreshCw size={14} /> Muat ulang</button></div>
       {d.pending.length === 0 ? <Empty icon={Wallet} title="Tidak ada deposit yang menunggu" /> : (
         <div className="table-wrap"><table>
           <thead><tr><th>Waktu</th><th>Ref</th><th>User</th><th className="right">Nominal</th><th>Kadaluarsa</th><th /></tr></thead>
           <tbody>{d.pending.map((p) => (
-            <tr key={p.ref}><td>{tgl(p.at)}</td><td className="mono">{p.ref}</td><td className="mono">{p.user_id}</td>
+            <tr key={p.ref}><td>{tgl(p.at)}</td><td className="mono">{p.ref}{p.gateway && <div className="small muted">{p.gateway === 'autogopay' ? 'AutoGoPay' : 'Pakasir'}</div>}</td><td className="mono">{p.user_id}</td>
               <td className="right">{rp(p.credit || p.amount)}</td><td>{tgl(p.expired_at)}</td>
               <td className="row" style={{ flexWrap: 'nowrap' }}>
                 <button className="btn soft sm" onClick={() => check(p.ref)} disabled={busy === p.ref}>{busy === p.ref ? <span className="spinner" /> : <RefreshCw size={13} />} Cek</button>

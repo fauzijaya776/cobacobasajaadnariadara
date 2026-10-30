@@ -42,6 +42,8 @@ const {
   handleDeposit,
   handleDepositAmount,
   handleDepositCheck,
+  handleDepositCancel,
+  resumePaymentMonitors,
   verifyAndCreditDeposit
 } = require('./handlers/depositHandler');
 const { handleFAQ } = require('./handlers/faqHandler');
@@ -56,6 +58,7 @@ const DatabaseBackup = require('./utils/dbBackup');
 const store = require('./utils/store');
 const BackupTelegram = require('./utils/backupTelegram');
 const pakasir = require('./utils/pakasir');
+const gateway = require('./utils/gateway');
 const { maintenanceMessage, blockedInfo } = require('./utils/settings');
 const { createWebApi } = require('./webApi');
 
@@ -70,7 +73,7 @@ if (!process.env.ADMIN_ID) {
 
 /* ============ Web service (Render butuh port terbuka) ============ */
 const port = Number(process.env.PORT) || 3000;
-const paymentGateway = 'pakasir';
+const paymentGateway = () => gateway.activeGateway(); // gateway untuk deposit BARU
 
 /**
  * Proses satu callback Pakasir.
@@ -146,7 +149,8 @@ const webServer = http.createServer((req, res) => {
     ? JSON.stringify({
         status: 'ok',
         service: 'rdp-installation-bot',
-        paymentGateway,
+        paymentGateway: paymentGateway(),
+        paymentConfigured: gateway.isConfigured(),
         uptime: Math.floor(process.uptime()),
         activeSessions: userSessions.size,
         storage: 'json-file',
@@ -154,7 +158,7 @@ const webServer = http.createServer((req, res) => {
         autoBackup: Boolean(backupChatId),
         pakasirConfigured: pakasir.isConfigured()
       })
-    : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS (Pakasir) sedang berjalan.</p></body></html>';
+    : '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>RDP Installation Bot</title></head><body><h1>RDP Installation Bot aktif</h1><p>Bot Telegram dan layanan deposit QRIS sedang berjalan.</p></body></html>';
 
   res.writeHead(200, {
     'Content-Type': isHealthCheck ? 'application/json; charset=utf-8' : 'text/html; charset=utf-8'
@@ -163,7 +167,7 @@ const webServer = http.createServer((req, res) => {
 });
 
 webServer.listen(port, '0.0.0.0', () => {
-  console.log(`Web status aktif pada port ${port}; payment gateway: ${paymentGateway}`);
+  console.log(`Web status aktif pada port ${port}; payment gateway: ${paymentGateway()}`);
 });
 
 /* ============ Bot ============ */
@@ -272,6 +276,8 @@ async function siapkanData() {
 }
 
 const dataSiap = siapkanData();
+// Pemantau pembayaran hidup di memori: lanjutkan untuk deposit yang masih menunggu.
+dataSiap.then(() => resumePaymentMonitors(bot)).catch((e) => console.error('[DEPOSIT] gagal melanjutkan pemantau:', e.message));
 const webApi = createWebApi({ bot, dataSiap });
 // SSH online (WebSocket) untuk website.
 webServer.on('upgrade', (req, socket, head) => webApi.upgrade(req, socket, head));
@@ -731,6 +737,12 @@ bot.on('callback_query', async (query) => {
     if (data.startsWith('paycheck:')) {
       const ref = data.slice('paycheck:'.length);
       await handleDepositCheck(bot, chatId, ref, query);
+      return;
+    }
+    // Tombol "Batal" di pesan QRIS: paycancel:<order_id>.
+    if (data.startsWith('paycancel:')) {
+      await dataSiap;
+      await handleDepositCancel(bot, chatId, data.slice('paycancel:'.length), query);
       return;
     }
 

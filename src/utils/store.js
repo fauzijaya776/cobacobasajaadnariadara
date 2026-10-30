@@ -444,6 +444,9 @@ class Store {
       total_payment: opt.total_payment != null ? Number(opt.total_payment) : null,
       fee_payer: opt.fee_payer || null,
       expired_at: opt.expired_at || null,
+      gateway: opt.gateway || null,           // 'autogopay' | 'pakasir' (null = pakasir, data lama)
+      qr_string: opt.qr_string || null,       // untuk menampilkan ulang QRIS yang sama (anti-spam)
+      checkout_url: opt.checkout_url || null,
       at: new Date().toISOString()
     };
     // Batasi agar tidak menumpuk selamanya (buang yang paling lama).

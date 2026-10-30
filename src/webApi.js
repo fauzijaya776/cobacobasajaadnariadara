@@ -14,7 +14,7 @@ const { promisify } = require('util');
 const QRCode = require('qrcode');
 
 const store = require('./utils/store');
-const pakasir = require('./utils/pakasir');
+const gateway = require('./utils/gateway');
 const ssh = require('./utils/ssh');
 const installLock = require('./utils/installLock');
 const DO = require('./utils/digitalocean');
@@ -33,7 +33,7 @@ const { settings, maintenanceMessage, blocked, blockedInfo } = require('./utils/
 const { MIN_CPU, MIN_RAM, MIN_STORAGE } = require('./handlers/rdpHandler');
 const { installOne, parseTargetLine, friendlyError, MAX_TARGETS } = require('./handlers/multiInstallHandler');
 const {
-  verifyAndCreditDeposit, startPaymentMonitor, generateUniqueCode, MIN_DEPOSIT, MAX_DEPOSIT
+  verifyAndCreditDeposit, startDeposit, cancelDeposit, MIN_DEPOSIT, MAX_DEPOSIT
 } = require('./handlers/depositHandler');
 const broadcastMessage = require('./handlers/broadcastMessage');
 const { createSshGateway } = require('./webSsh');
@@ -522,34 +522,43 @@ function createWebApi({ bot, dataSiap }) {
   route('POST', /^\/deposit$/, 'user', async (ctx) => {
     const { body, uid } = ctx;
     guardMaint(ctx);
-    if (!pakasir.isConfigured()) fail(503, 'Pembayaran belum dikonfigurasi admin.');
+    if (!gateway.isConfigured()) fail(503, 'Pembayaran belum dikonfigurasi admin.');
     const amount = parseInt(String(body.amount || '').replace(/\D/g, ''), 10);
     if (!amount || amount < MIN_DEPOSIT || amount > MAX_DEPOSIT) {
       fail(400, `Nominal harus Rp ${MIN_DEPOSIT.toLocaleString('id-ID')} – Rp ${MAX_DEPOSIT.toLocaleString('id-ID')}.`);
     }
     limit(`dep:${uid}`, 10, 10 * 60 * 1000);
-    const ref = generateUniqueCode();
-    let p;
+    // Aturan anti-blokir (utils/gateway.js): QRIS hidup ditampilkan ulang, batas harian,
+    // jeda, rem darurat. Generate QRIS hanya SEKALI per permintaan, tanpa retry.
+    let dep;
     try {
-      p = await pakasir.createPayment(ref, amount);
+      dep = await startDeposit(bot, uid, amount);
     } catch (error) {
+      if (error.userMessage) fail(error.status || 429, error.message);
       console.error('[WEB DEPOSIT]', error.message);
-      fail(502, /QRIS|Nominal|minimal|maksimal/i.test(error.message) ? error.message : 'Gagal membuat QRIS. Coba lagi.');
+      fail(502, /QRIS|Nominal|minimal|maksimal/i.test(error.message) && !/gagal \(/i.test(error.message) ? error.message : 'Gagal membuat QRIS. Coba lagi beberapa menit lagi.');
     }
-    store.addPendingDeposit(ref, uid, amount, {
-      txn_id: p.txnId, credit: p.amount, gateway_amount: p.gatewayAmount,
-      total_payment: p.totalBayar, fee_payer: p.feePayer, expired_at: p.expired_at
-    });
-    startPaymentMonitor(bot, ref);
+    const p = dep.pending;
     return {
-      ref,
-      amount,
-      total: p.totalBayar,
-      credit: p.amount,
+      ref: dep.ref,
+      amount: p.amount,
+      total: p.total_payment || p.credit || p.amount,
+      credit: p.credit,
       expired_at: p.expired_at,
-      sandbox: p.isSandbox,
+      sandbox: Boolean(dep.sandbox),
+      reused: dep.reused,
+      notice: dep.reused ? 'Kamu masih punya QRIS yang belum dibayar. Bayar yang ini, atau batalkan dulu untuk ganti nominal.' : undefined,
+      checkout_url: p.checkout_url || undefined,
       qr: await QRCode.toDataURL(p.qr_string, { width: 400, margin: 1 })
     };
+  });
+
+  route('POST', /^\/deposit\/([\w-]+)\/cancel$/, 'user', async ({ uid, m }) => {
+    limit(`depcancel:${uid}`, 10, 10 * 60 * 1000);
+    const pending = store.getPendingDeposit(m[1]);
+    if (!pending || Number(pending.user_id) !== uid) fail(404, 'Transaksi tidak ditemukan.');
+    const r = await cancelDeposit(bot, m[1], uid);
+    return { state: r.state, balance: store.getBalance(uid) };
   });
 
   route('GET', /^\/deposit\/([\w-]+)$/, 'user', async ({ uid, m }) => {
@@ -972,7 +981,7 @@ function createWebApi({ bot, dataSiap }) {
 
   route('GET', /^\/admin\/deposits$/, 'admin', async () => ({
     pending: Object.entries(store.data.pendingDeposits || {})
-      .map(([ref, p]) => ({ ref, user_id: p.user_id, amount: p.amount, credit: p.credit, at: p.at, expired_at: p.expired_at }))
+      .map(([ref, p]) => ({ ref, user_id: p.user_id, amount: p.amount, credit: p.credit, at: p.at, expired_at: p.expired_at, gateway: p.gateway || 'pakasir' }))
       .sort((a, b) => String(b.at).localeCompare(String(a.at))),
     credited: Object.entries(store.data.deposits || {})
       .map(([ref, d]) => ({ ref, ...d }))
