@@ -56,7 +56,9 @@ function dataKosong() {
     // Pengaturan dari panel admin: { installCost, vpsCreateCost, maintenance:{on,message}, ads }
     settings: {},
     // User yang diblokir: uid -> { at, by, reason }. Saldo tidak disentuh.
-    blocked: {}
+    blocked: {},
+    // Pengaturan AutoGoPay dari admin (key TERENKRIPSI, pilihan gateway). Lihat agpConfig.js.
+    autogopay: {}
   };
 }
 
@@ -206,6 +208,7 @@ class Store {
     d.adminLog = Array.isArray(obj.adminLog) ? obj.adminLog.slice(-3000) : [];
     d.settings = (obj.settings && typeof obj.settings === 'object') ? obj.settings : {};
     d.blocked = (obj.blocked && typeof obj.blocked === 'object') ? obj.blocked : {};
+    d.autogopay = (obj.autogopay && typeof obj.autogopay === 'object') ? obj.autogopay : {};
 
     // Nomor urut dihitung sekali di sini. Memakai Math.max(...array) tiap kali
     // menambah data akan melempar RangeError begitu riwayat melewati ~126.000
@@ -444,6 +447,9 @@ class Store {
       total_payment: opt.total_payment != null ? Number(opt.total_payment) : null,
       fee_payer: opt.fee_payer || null,
       expired_at: opt.expired_at || null,
+      gateway: opt.gateway || null,           // 'autogopay' | 'pakasir' (null = pakasir, data lama)
+      qr_string: opt.qr_string || null,       // untuk menampilkan ulang QRIS yang sama (anti-spam)
+      checkout_url: opt.checkout_url || null,
       at: new Date().toISOString()
     };
     // Batasi agar tidak menumpuk selamanya (buang yang paling lama).

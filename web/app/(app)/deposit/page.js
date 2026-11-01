@@ -34,8 +34,30 @@ export default function Deposit() {
   async function create(e) {
     e.preventDefault();
     setBusy(true); setErr(''); setState('');
-    try { setPay(await api('/deposit', { method: 'POST', body: { amount } })); }
-    catch (e) { setErr(e.message); }
+    try {
+      const d = await api('/deposit', { method: 'POST', body: { amount } });
+      setPay(d);
+      if (d.notice) toast(d.notice, 'bad');
+    } catch (e) { setErr(e.message); }
+    // jeda singkat sebelum tombol aktif lagi: mencegah klik beruntun (QRIS beruntun = spam)
+    setTimeout(() => setBusy(false), 3000);
+  }
+
+  // Batal = ikut dibatalkan di server (bukan cuma menutup layar), supaya QRIS
+  // lama tidak menggantung dan tidak terbuat QRIS beruntun.
+  async function cancel() {
+    if (!pay) return;
+    setBusy(true);
+    try {
+      const r = await api(`/deposit/${pay.ref}/cancel`, { method: 'POST' });
+      if (r.state === 'credited' || r.state === 'already') { setState(r.state); reload(); loadRecent(); toast('Ternyata sudah dibayar, saldo sudah masuk.'); }
+      else {
+        if (r.state === 'kept') toast('QRIS ini akan gugur sendiri. Kalau terlanjur dibayar, saldo tetap masuk otomatis.');
+        setPay(null); setState('');
+      }
+    } catch (e) {
+      if (e.status === 404) { setPay(null); setState(''); } else toast(e.message, 'bad');
+    }
     setBusy(false);
   }
 
@@ -111,8 +133,9 @@ export default function Deposit() {
             {pay.sandbox && <Alert tone="warn">Mode sandbox — bukan pembayaran sungguhan.</Alert>}
             <div className="row mt" style={{ justifyContent: 'center' }}>
               <button className="btn ghost" onClick={() => check(true)}><RefreshCw size={15} /> Cek status</button>
-              <button className="btn ghost" onClick={() => { setPay(null); setState(''); }}>Batal</button>
+              <button className="btn ghost" onClick={cancel} disabled={busy}>Batal</button>
             </div>
+            {pay.checkout_url && <p className="small mt"><a href={pay.checkout_url} target="_blank" rel="noopener noreferrer">Bayar lewat browser</a></p>}
             <p className="hint">Halaman ini memeriksa otomatis. Anda boleh menutupnya — saldo tetap masuk setelah dibayar.</p>
           </div>
         )}

@@ -1,6 +1,6 @@
 const QRCode = require("qrcode");
 
-const pakasir = require("../utils/pakasir");
+const gateway = require("../utils/gateway");
 const { createPaymentMessage } = require("../utils/messageFormatter");
 const store = require("../utils/store");
 const { maintenanceFor } = require("../utils/settings");
@@ -13,23 +13,23 @@ function generateUniqueCode() {
 }
 
 /**
- * Cache status per txn_id supaya tidak melanggar batas Pakasir v2
- * (1 permintaan status / 4 detik / transaksi). Webhook, pemantau otomatis, dan
- * tombol "Cek Status" bisa datang berdekatan; ini mencegah error 429.
+ * Cache status per txn_id supaya tidak membanjiri gateway (Pakasir v2: maks.
+ * 1 cek / 4 detik / transaksi; AutoGoPay sudah memantau sendiri, cukup 8 detik).
+ * Webhook, pemantau otomatis, website, dan tombol "Cek Status" bisa datang
+ * berdekatan; ini mencegah error 429.
  */
 const statusCache = new Map(); // txn_id -> { at, result }
 
 async function getStatus(pending) {
-  // Deposit lama (sebelum migrasi v2) tidak punya txn_id → pakai endpoint v1.
-  if (!pending.txn_id) {
-    return pakasir.checkStatusLegacy(pending.ref, pending.amount);
-  }
+  // Deposit Pakasir lama (sebelum migrasi v2) tidak punya txn_id → endpoint v1.
+  if (!pending.txn_id) return gateway.checkStatus(pending);
   const key = pending.txn_id;
+  const gap = gateway.gatewayOf(pending) === "autogopay" ? 8000 : 4000;
   const cached = statusCache.get(key);
-  if (cached && Date.now() - cached.at < pakasir.STATUS_GAP_MS) {
-    return cached.result; // masih segar, jangan panggil Pakasir lagi
+  if (cached && Date.now() - cached.at < gap) {
+    return cached.result; // masih segar, jangan panggil gateway lagi
   }
-  const result = await pakasir.checkStatusByTxn(key);
+  const result = await gateway.checkStatus(pending);
   statusCache.set(key, { at: Date.now(), result });
   // Jaga cache tetap kecil.
   if (statusCache.size > 500) {
@@ -74,20 +74,21 @@ async function verifyAndCreditDeposit(bot, ref) {
   try {
     trx = await getStatus(pending);
   } catch (error) {
-    console.error(`[PAKASIR VERIFY] ref=${ref} gagal cek status: ${error.message}`);
+    console.error(`[DEPOSIT VERIFY] ref=${ref} gagal cek status: ${error.message}`);
     return { state: "error", amount: pending.amount };
   }
 
   const status = trx && trx.status;
   if (status === "canceled") {
-    // Gugur di Pakasir (dibatalkan di dasbor / lewat 24 jam). Berhenti menunggu.
+    // Gugur di gateway (dibatalkan / kedaluwarsa). Berhenti menunggu.
     store.removePendingDeposit(ref);
+    gateway.mark(ref, "ended");
     return { state: "expired", amount: pending.amount };
   }
   if (status !== "completed") return { state: "unpaid", amount: pending.amount };
 
   if (!amountMatches(pending, trx.amount)) {
-    console.error(`[PAKASIR VERIFY] ref=${ref} nominal Pakasir (${trx.amount}) tidak cocok.`);
+    console.error(`[DEPOSIT VERIFY] ref=${ref} nominal Pakasir (${trx.amount}) tidak cocok.`);
     return { state: "error", amount: pending.amount };
   }
 
@@ -98,6 +99,7 @@ async function verifyAndCreditDeposit(bot, ref) {
 
   const hasil = store.creditDeposit(pending.user_id, kredit, ref, "deposit");
   store.removePendingDeposit(ref);
+  gateway.mark(ref, "paid");
 
   if (qrMsgId) bot.deleteMessage(pending.user_id, qrMsgId).catch(() => {});
 
@@ -128,21 +130,25 @@ async function verifyAndCreditDeposit(bot, ref) {
 }
 
 /**
- * Pemantau pembayaran otomatis (jaring pengaman). Menanyakan status ke Pakasir
- * tiap 20 detik (aman dari batas 4 detik), maksimal 20 menit, lalu berhenti.
+ * Pemantau pembayaran otomatis (jaring pengaman). Menanyakan status ke gateway
+ * tiap 20 detik, maksimal 20 menit, lalu berhenti.
  */
+const monitored = new Set();
 function startPaymentMonitor(bot, ref) {
+  if (monitored.has(ref)) return; // satu pemantau per deposit
+  monitored.add(ref);
   const POLL_MS = 20000;
   const MAX_MS = 20 * 60 * 1000;
   const startedAt = Date.now();
 
   const timer = setInterval(async () => {
-    if (!store.getPendingDeposit(ref)) { clearInterval(timer); return; }
-    if (Date.now() - startedAt > MAX_MS) { clearInterval(timer); return; }
+    const stop = () => { clearInterval(timer); monitored.delete(ref); };
+    if (!store.getPendingDeposit(ref)) { stop(); return; }
+    if (Date.now() - startedAt > MAX_MS) { stop(); return; }
     try {
       const { state } = await verifyAndCreditDeposit(bot, ref);
       if (state === "credited" || state === "already" || state === "expired" || state === "unknown") {
-        clearInterval(timer);
+        stop();
       }
     } catch (_) { /* siklus berikutnya mencoba lagi */ }
   }, POLL_MS);
@@ -150,9 +156,92 @@ function startPaymentMonitor(bot, ref) {
   if (timer.unref) timer.unref();
 }
 
+/**
+ * Setelah server restart, pemantau di memori hilang. Jalankan lagi untuk semua
+ * deposit yang masih menunggu (maks. 25 jam) supaya saldo tetap masuk walau
+ * pembeli menutup halaman / tidak menekan "Cek Status".
+ */
+function resumePaymentMonitors(bot) {
+  const all = (store.data && store.data.pendingDeposits) || {};
+  let n = 0;
+  for (const [ref, p] of Object.entries(all)) {
+    if (Date.now() - new Date(p.at).getTime() > 25 * 3600e3) continue;
+    startPaymentMonitor(bot, ref);
+    n++;
+  }
+  if (n) console.log(`[DEPOSIT] ${n} pemantau pembayaran dilanjutkan setelah restart.`);
+  return n;
+}
+
+/* ================== BUAT DEPOSIT (dipakai bot & website) ================== */
+let lastBrakeAlert = 0;
+function alertBrake(bot) {
+  if (Date.now() - lastBrakeAlert < 10 * 60000) return;
+  lastBrakeAlert = Date.now();
+  const admins = String(process.env.ADMIN_ID || "").split(",").map((x) => x.trim()).filter(Boolean);
+  for (const id of admins) {
+    bot.sendMessage(id, "🚨 REM DARURAT QRIS AKTIF\nPembuatan QRIS per menit melewati batas (kemungkinan serangan bot). " +
+      "Deposit ditolak sementara. Set DEPOSIT_ENABLED=0 di Render untuk menutup deposit.").catch(() => {});
+  }
+}
+
+/**
+ * Aturan anti-blokir + buat QRIS. SATU kali panggil ke gateway, tanpa retry.
+ * @returns {Promise<{ref, pending, reused:boolean}>}  pending = data deposit tersimpan
+ * @throws  Error dengan .status (HTTP) dan pesan yang aman ditampilkan ke user.
+ */
+async function startDeposit(bot, userId, amount) {
+  const g = gateway.guardNewQris(userId);
+  if (g.reuse) return { ref: g.reuse.ref, pending: g.reuse.p, reused: true };
+  if (g.error) {
+    if (g.brake) alertBrake(bot);
+    throw Object.assign(new Error(g.error), { status: g.status, userMessage: true });
+  }
+  const ref = generateUniqueCode();
+  gateway.record(userId, ref); // dihitung walau gagal: klik ulang tidak memicu generate beruntun
+  let p;
+  try {
+    p = await gateway.createPayment(ref, amount);
+    if (!p || !p.qr_string) throw new Error("QRIS gagal dibuat");
+  } catch (error) {
+    gateway.mark(ref, "ended");
+    throw error;
+  }
+  // Catat deposit menunggu SECARA PERMANEN sebelum QR ditampilkan, lengkap
+  // dengan txn_id (wajib untuk cek status) dan nominal yang akan dikredit.
+  store.addPendingDeposit(ref, userId, amount, {
+    txn_id: p.txnId, credit: p.amount, gateway_amount: p.gatewayAmount,
+    total_payment: p.totalBayar, fee_payer: p.feePayer, expired_at: p.expired_at,
+    gateway: p.gateway, qr_string: p.qr_string, checkout_url: p.checkoutUrl || null,
+  });
+  startPaymentMonitor(bot, ref);
+  return { ref, pending: store.getPendingDeposit(ref), reused: false, sandbox: p.isSandbox };
+}
+
+/**
+ * Pembeli membatalkan. Cek dulu (mungkin sudah dibayar), lalu batalkan di
+ * AutoGoPay. QRIS Pakasir tidak bisa dibatalkan (tetap bisa dibayar sampai
+ * gugur), jadi deposit Pakasir TETAP dipantau supaya saldo tidak hilang.
+ * @returns {Promise<{state:string}>} credited | already | canceled | kept | unknown
+ */
+async function cancelDeposit(bot, ref, userId) {
+  const pending = store.getPendingDeposit(ref);
+  if (!pending || Number(pending.user_id) !== Number(userId)) return { state: "unknown" };
+  const r = await verifyAndCreditDeposit(bot, ref);
+  if (r.state === "credited" || r.state === "already") return r;
+  if (r.state === "expired") return { state: "canceled" };
+  if (gateway.gatewayOf(pending) === "autogopay" && await gateway.cancel(pending)) {
+    if (pending.msg_id) bot.deleteMessage(pending.user_id, pending.msg_id).catch(() => {});
+    store.removePendingDeposit(ref);
+    gateway.mark(ref, "ended");
+    return { state: "canceled" };
+  }
+  return { state: "kept" };
+}
+
 /* ================== STEP 1 ================== */
 const MIN_DEPOSIT = 2000;
-const MAX_DEPOSIT = 10000000; // batas QRIS Pakasir
+const MAX_DEPOSIT = 10000000; // batas QRIS
 
 async function handleDeposit(bot, chatId, messageId) {
   const text =
@@ -226,38 +315,42 @@ ${mt}`, {
       }).catch(() => {});
       return true;
     }
-    const reffId = generateUniqueCode();
-
-    const paymentData = await pakasir.createPayment(reffId, amount);
-    if (!paymentData?.qr_string) throw new Error("QRIS gagal dibuat");
-
-    // Catat deposit menunggu SECARA PERMANEN sebelum QR ditampilkan, lengkap
-    // dengan txn_id (wajib untuk cek status v2) dan nominal yang akan dikredit.
-    store.addPendingDeposit(reffId, chatId, amount, {
-      txn_id: paymentData.txnId,
-      credit: paymentData.amount,
-      gateway_amount: paymentData.gatewayAmount,
-      total_payment: paymentData.totalBayar,
-      fee_payer: paymentData.feePayer,
-      expired_at: paymentData.expired_at,
-    });
-
-    const { messageText } = createPaymentMessage(paymentData, amount);
+    let dep;
+    try {
+      dep = await startDeposit(bot, chatId, amount);
+    } catch (error) {
+      if (!error.userMessage) throw error;
+      await bot.editMessageText(`⚠️ ${error.message}`, {
+        chat_id: chatId, message_id: session.messageId,
+        reply_markup: { inline_keyboard: [[{ text: "« Menu", callback_data: "back_to_menu" }]] },
+      }).catch(() => {});
+      return true;
+    }
+    const { ref, pending, reused } = dep;
+    const total = Number(pending.total_payment || pending.credit || pending.amount);
+    const { messageText } = createPaymentMessage({ totalBayar: total }, Number(pending.amount));
     const catatanBiaya =
-      paymentData.feePayer === "merchant"
-        ? "\n\n_Biaya QRIS ditanggung penjual — kamu membayar persis sesuai nominal._"
+      pending.fee_payer === "merchant" || pending.fee_payer === "none"
+        ? "\n\n_Tanpa biaya tambahan — kamu membayar persis sesuai nominal._"
         : "";
-    const catatanSandbox = paymentData.isSandbox
-      ? "\n\n⚠️ _Mode sandbox — bukan pembayaran sungguhan._"
+    const catatanSandbox = dep.sandbox ? "\n\n⚠️ _Mode sandbox — bukan pembayaran sungguhan._" : "";
+    const catatanUlang = reused
+      ? "⚠️ *Kamu masih punya QRIS yang belum dibayar.* Bayar yang ini, atau tekan ❌ Batal untuk ganti nominal.\n\n"
       : "";
 
-    const qrBuffer = await QRCode.toBuffer(paymentData.qr_string, {
-      type: "png",
-      width: 500,
-    });
+    const qrBuffer = await QRCode.toBuffer(pending.qr_string, { type: "png", width: 500 });
+    const keyboard = [
+      [{ text: "🔄 Cek Status Pembayaran", callback_data: `paycheck:${ref}` }],
+      [{ text: "❌ Batal", callback_data: `paycancel:${ref}` }, { text: "🏠 Menu Utama", callback_data: "back_to_menu" }],
+    ];
+    if (pending.checkout_url) keyboard.push([{ text: "🌐 Bayar via Browser", url: pending.checkout_url }]);
 
+    // QR lama (kalau ditampilkan ulang) dihapus supaya hanya ada satu di chat.
+    if (reused && pending.msg_id) bot.deleteMessage(chatId, pending.msg_id).catch(() => {});
+    bot.deleteMessage(chatId, session.messageId).catch(() => {});
     const qrMsg = await bot.sendPhoto(chatId, qrBuffer, {
       caption:
+        catatanUlang +
         messageText +
         catatanBiaya +
         catatanSandbox +
@@ -265,34 +358,43 @@ ${mt}`, {
         "akan hilang sendiri begitu pembayaran masuk. Bila sudah bayar tapi saldo " +
         "belum masuk dalam 1-2 menit, tekan tombol *Cek Status Pembayaran* di bawah._",
       parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🔄 Cek Status Pembayaran", callback_data: `paycheck:${reffId}` }],
-          [{ text: "🏠 Menu Utama", callback_data: "back_to_menu" }],
-        ],
-      },
+      reply_markup: { inline_keyboard: keyboard },
     });
 
     if (qrMsg && qrMsg.message_id) {
-      store.attachPendingMessage(reffId, qrMsg.message_id);
+      store.attachPendingMessage(ref, qrMsg.message_id);
     }
-
-    startPaymentMonitor(bot, reffId);
 
     return true;
   } catch (error) {
     console.error("Payment Error:", error.message);
     // Pesan validasi nominal (mis. terlalu kecil untuk QRIS) ditampilkan apa adanya.
-    const ramah = /QRIS|Nominal|minimal|maksimal/i.test(error.message)
+    const ramah = /QRIS|Nominal|minimal|maksimal/i.test(error.message) && !/gagal \(/i.test(error.message)
       ? error.message
-      : "Kemungkinan konfigurasi Pakasir (PAKASIR_PROJECT / PAKASIR_API_KEY) belum benar, " +
-        "atau layanan sedang sibuk. Coba lagi beberapa saat.";
+      : "Server pembayaran sedang sibuk atau konfigurasi gateway belum benar. Coba lagi beberapa menit lagi.";
     await bot.editMessageText(
       "❌ Gagal membuat pembayaran QRIS.\n\n" + ramah,
       { chat_id: chatId, message_id: session.messageId }
     ).catch(() => {});
     return true;
   }
+}
+
+/* ================== TOMBOL "BATAL" ================== */
+async function handleDepositCancel(bot, chatId, ref, query) {
+  const answer = (text) => {
+    if (query && bot.answerCallbackQuery) bot.answerCallbackQuery(query.id, { text, show_alert: true }).catch(() => {});
+  };
+  const r = await cancelDeposit(bot, ref, chatId);
+  const text = {
+    credited: "✅ Ternyata sudah dibayar — saldo sudah ditambahkan.",
+    already: "✅ Pembayaran ini sudah lunas dan saldonya sudah masuk.",
+    canceled: "❌ Tagihan dibatalkan. Kamu bisa membuat deposit baru setelah jeda singkat.",
+    kept: "ℹ️ QRIS ini tidak bisa dibatalkan di server pembayaran dan akan gugur sendiri. Kalau terlanjur dibayar, saldo tetap masuk otomatis.",
+    unknown: "ℹ️ Tagihan sudah tidak aktif.",
+  }[r.state] || "ℹ️ Tagihan sudah tidak aktif.";
+  answer(text);
+  if (r.state === "canceled" && query && query.message) bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
 }
 
 /* ================== TOMBOL "CEK STATUS" ================== */
@@ -338,6 +440,10 @@ module.exports = {
   handleDeposit,
   handleDepositAmount,
   handleDepositCheck,
+  handleDepositCancel,
+  startDeposit,
+  cancelDeposit,
+  resumePaymentMonitors,
   verifyAndCreditDeposit,
   startPaymentMonitor,
   generateUniqueCode,
