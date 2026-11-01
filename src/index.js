@@ -149,6 +149,7 @@ const webServer = http.createServer((req, res) => {
     ? JSON.stringify({
         status: 'ok',
         service: 'rdp-installation-bot',
+        // Publik: hanya nama gateway & status siap. Key (bahkan tersamar) tidak pernah ditampilkan.
         paymentGateway: paymentGateway(),
         paymentConfigured: gateway.isConfigured(),
         uptime: Math.floor(process.uptime()),
@@ -276,6 +277,8 @@ async function siapkanData() {
 }
 
 const dataSiap = siapkanData();
+// AutoGoPay tanpa akses Environment Render: /setagpkey, /agpkey, /agpgateway, /hapusagpkey (khusus admin).
+require('./handlers/agpAdminHandler').registerAgpCommands(bot, dataSiap);
 // Pemantau pembayaran hidup di memori: lanjutkan untuk deposit yang masih menunggu.
 dataSiap.then(() => resumePaymentMonitors(bot)).catch((e) => console.error('[DEPOSIT] gagal melanjutkan pemantau:', e.message));
 const webApi = createWebApi({ bot, dataSiap });

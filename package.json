@@ -6,7 +6,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "migrasi-json": "node scripts/migrasi-ke-json.js",
-    "test": "node test-webapi.js && node test-ssh.js && node test-deposit.js"
+    "test": "node test-webapi.js && node test-ssh.js && node test-deposit.js && node test-agpkey.js"
   },
   "dependencies": {
     "axios": "^1.6.2",

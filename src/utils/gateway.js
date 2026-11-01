@@ -12,15 +12,21 @@
 const pakasir = require('./pakasir');
 const agp = require('./autogopay');
 const store = require('./store');
+const agpConfig = require('./agpConfig');
 
+// Gateway deposit baru: env PAYMENT_PROVIDER -> pilihan admin (/agpgateway, panel admin)
+// -> otomatis (autogopay kalau ada API key dari env atau /setagpkey). Lihat agpConfig.js.
 function activeGateway() {
-  const p = String(process.env.PAYMENT_PROVIDER || '').trim().toLowerCase();
-  if (p === 'autogopay' || p === 'pakasir') return p;
-  return process.env.AUTOGOPAY_API_KEY ? 'autogopay' : 'pakasir';
+  return agpConfig.providerChoice() || (agpConfig.apiKey() ? 'autogopay' : 'pakasir');
 }
 
 function isConfigured() {
-  return activeGateway() === 'autogopay' ? Boolean(process.env.AUTOGOPAY_API_KEY) : pakasir.isConfigured();
+  return activeGateway() === 'autogopay' ? Boolean(agpConfig.apiKey()) : pakasir.isConfigured();
+}
+
+/** Ringkasan untuk /agpkey, panel admin, dan /health. Key tidak pernah utuh. */
+function describe() {
+  return { gateway: activeGateway(), configured: isConfigured(), ...agpConfig.info() };
 }
 
 const gatewayOf = (pending) => (pending && pending.gateway) || 'pakasir';
@@ -139,6 +145,6 @@ function guardNewQris(userId) {
 }
 
 module.exports = {
-  activeGateway, isConfigured, gatewayOf, createPayment, checkStatus, cancel,
+  activeGateway, isConfigured, describe, gatewayOf, createPayment, checkStatus, cancel,
   guardNewQris, record, mark, LIMITS, _log: log,
 };

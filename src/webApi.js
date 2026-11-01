@@ -15,6 +15,7 @@ const QRCode = require('qrcode');
 
 const store = require('./utils/store');
 const gateway = require('./utils/gateway');
+const agpAdmin = require('./handlers/agpAdminHandler');
 const ssh = require('./utils/ssh');
 const installLock = require('./utils/installLock');
 const DO = require('./utils/digitalocean');
@@ -1023,6 +1024,28 @@ function createWebApi({ bot, dataSiap }) {
     acc.hash = await hashPassword(password);
     audit(ctx, 'akun_reset_password', acc.username);
     return { ok: true };
+  });
+
+  /* ---------- AutoGoPay (tanpa akses Environment Render) ---------- */
+  // Sama dengan /setagpkey di Telegram, tetapi lewat HTTPS + login admin — tidak lewat Telegram.
+  route('GET', /^\/admin\/autogopay$/, 'admin', async () => {
+    const d = gateway.describe();
+    return { ...d, status: await agpAdmin.statusText() };
+  });
+
+  route('POST', /^\/admin\/autogopay$/, 'admin', async (ctx) => {
+    const { body } = ctx;
+    limit(`agp:${ctx.ip}`, 10, 10 * 60 * 1000);
+    const by = `web:${(ctx.acc && ctx.acc.username) || '-'}`;
+    let r;
+    if (body.action === 'key') r = await agpAdmin.setKey(bot, body.key, by);
+    else if (body.action === 'gateway') r = await agpAdmin.setGateway(bot, body.gateway, by);
+    else if (body.action === 'clear') r = await agpAdmin.clearKey(bot, by);
+    else fail(400, 'Aksi tidak dikenal.');
+    // Key tidak pernah ikut tercatat di log.
+    audit(ctx, `autogopay_${body.action}`, r.ok ? (body.action === 'gateway' ? String(body.gateway) : 'ok') : 'gagal');
+    if (!r.ok) fail(400, r.message);
+    return { ok: true, message: r.message, ...gateway.describe() };
   });
 
   route('GET', /^\/admin\/settings$/, 'admin', async () => {

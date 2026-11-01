@@ -261,6 +261,44 @@ function UsersTab() {
 }
 
 /* ================= Deposit ================= */
+/* AutoGoPay tanpa akses Environment Render. Key dikirim lewat HTTPS ke server bot,
+   disimpan terenkripsi; tidak pernah ditampilkan utuh dan tidak lewat Telegram. */
+function AgpCard() {
+  const { toast, confirm } = useUi();
+  const [d, setD] = useState(null);
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = () => api('/admin/autogopay').then(setD).catch((e) => toast(e.message, 'bad'));
+  useEffect(() => { load(); }, []);
+  async function send(body, ok) {
+    setBusy(true);
+    try { const r = await api('/admin/autogopay', { method: 'POST', body }); toast(ok); setKey(''); setD({ ...d, ...r, status: r.message.split('\n\n').slice(-1)[0] }); load(); }
+    catch (e) { toast(e.message, 'bad'); }
+    setBusy(false);
+  }
+  if (!d) return <div className="card"><Loading /></div>;
+  return (
+    <div className="card">
+      <div className="card-head"><div><h2>Gateway QRIS</h2><p>Deposit baru lewat <b>{d.gateway === 'autogopay' ? 'AutoGoPay' : 'Pakasir'}</b> (diatur: {d.providerSource}). Env Render, bila ada, selalu didahulukan.</p></div>
+        <button className="btn ghost sm" onClick={load}><RefreshCw size={14} /> Muat ulang</button></div>
+      <pre className="small" style={{ whiteSpace: 'pre-wrap', margin: '0 0 12px' }}>{d.status}</pre>
+      <form className="row" onSubmit={(e) => { e.preventDefault(); if (key.trim()) send({ action: 'key', key: key.trim() }, 'Key AutoGoPay disimpan.'); }}>
+        <input type="password" autoComplete="off" spellCheck={false} placeholder="agp_xxxxxxxx (API key AutoGoPay)" value={key} onChange={(e) => setKey(e.target.value)} style={{ flex: 1, minWidth: 220 }} />
+        <button className="btn sm" disabled={busy || !key.trim()}><KeyRound size={14} /> Simpan key</button>
+      </form>
+      <div className="row mt">
+        <button className="btn soft sm" disabled={busy} onClick={() => send({ action: 'gateway', gateway: 'autogopay' }, 'Gateway: AutoGoPay')}>Pakai AutoGoPay</button>
+        <button className="btn soft sm" disabled={busy} onClick={() => send({ action: 'gateway', gateway: 'pakasir' }, 'Gateway: Pakasir')}>Pakai Pakasir</button>
+        <button className="btn ghost sm" disabled={busy} onClick={() => send({ action: 'gateway', gateway: 'auto' }, 'Gateway: otomatis')}>Otomatis</button>
+        {d.keySource === 'admin' && <button className="btn danger ghost sm" disabled={busy} onClick={async () => {
+          if (await confirm({ title: 'Hapus key AutoGoPay?', body: 'Deposit baru kembali ke Pakasir (kalau tidak ada key di Environment Render).', danger: true, ok: 'Hapus' })) send({ action: 'clear' }, 'Key dihapus.');
+        }}><Trash2 size={13} /> Hapus key</button>}
+      </div>
+      <p className="hint">Setiap perubahan dikabarkan ke semua admin lewat Telegram. Key diverifikasi ke AutoGoPay tanpa membuat QRIS.</p>
+    </div>
+  );
+}
+
 function DepositsTab() {
   const { toast, confirm } = useUi();
   const [d, setD] = useState(null);
@@ -280,6 +318,7 @@ function DepositsTab() {
   }
   if (!d) return <Loading />;
   return (<>
+    <AgpCard />
     <div className="card">
       <div className="card-head"><div><h2>Menunggu pembayaran ({d.pending.length})</h2><p>Cek status langsung ke gateway (AutoGoPay/Pakasir) bila user lapor sudah bayar.</p></div>
         <button className="btn ghost sm" onClick={load}><RefreshCw size={14} /> Muat ulang</button></div>

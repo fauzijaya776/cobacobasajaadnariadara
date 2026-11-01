@@ -4,9 +4,10 @@ const axios = require("axios");
 
 const base = () => (process.env.AUTOGOPAY_BASE || "https://v1-gateway.autogopay.site").replace(/\/$/, "");
 
-async function call(path, body) {
-  const key = process.env.AUTOGOPAY_API_KEY;
-  if (!key) throw new Error("AUTOGOPAY_API_KEY belum di-set");
+// Key dari env AUTOGOPAY_API_KEY, atau yang disimpan admin (/setagpkey / panel admin).
+async function call(path, body, explicitKey) {
+  const key = explicitKey || require("./agpConfig").apiKey();
+  if (!key) throw new Error("API key AutoGoPay belum diatur (env AUTOGOPAY_API_KEY atau /setagpkey)");
   const res = await axios.post(`${base()}${path}`, body, {
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     timeout: 15000,
@@ -66,4 +67,17 @@ async function cancelQris(transactionId) {
   return !!data.success;
 }
 
-module.exports = { generateQris, qrisStatus, cancelQris, wibToIso };
+/** Cek key TANPA membuat QRIS: hanya membaca daftar transaksi (read-only). */
+async function verifyKey(key) {
+  try {
+    const { http, data } = await call("/transactions", {}, key);
+    if (http === 200 && data.success === true) return { ok: true };
+    if (http === 401 || http === 403) return { ok: false, reason: data.message || "key ditolak AutoGoPay" };
+    return { ok: false, reason: `AutoGoPay membalas HTTP ${http}${data.message ? ": " + data.message : ""}` };
+  } catch (e) {
+    return { ok: false, reason: `tidak bisa menghubungi AutoGoPay (${e.message})` };
+  }
+}
+
+module.exports = {
+  verifyKey, generateQris, qrisStatus, cancelQris, wibToIso };
